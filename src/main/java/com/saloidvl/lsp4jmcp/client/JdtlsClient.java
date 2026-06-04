@@ -101,6 +101,7 @@ public class JdtlsClient implements AutoCloseable {
     private volatile int recoveryActionExecutionCount;
     private volatile boolean closed;
     private volatile JdtlsClientState activeRecoveryState;
+    private volatile JdtlsRecoveryAction activeRecoveryAction = JdtlsRecoveryAction.NONE;
     private volatile JdtlsRecoveryAction pendingRecoveryAction = JdtlsRecoveryAction.NONE;
     private volatile String pendingRecoveryReason = "";
 
@@ -710,6 +711,7 @@ public class JdtlsClient implements AutoCloseable {
                 return false;
             }
             recoveryInFlight = true;
+            activeRecoveryAction = action;
             activeRecoveryState = action == JdtlsRecoveryAction.REINDEX
                 ? JdtlsClientState.RECOVERING_REINDEX
                 : JdtlsClientState.RECOVERING_RESTART;
@@ -723,6 +725,7 @@ public class JdtlsClient implements AutoCloseable {
     private void finishRecovery() {
         synchronized (stateLock) {
             recoveryInFlight = false;
+            activeRecoveryAction = JdtlsRecoveryAction.NONE;
             activeRecoveryState = null;
             if (!closed
                     && initialized
@@ -736,7 +739,8 @@ public class JdtlsClient implements AutoCloseable {
     }
 
     private void recordPendingRecoveryLocked(JdtlsRecoveryAction action, String reason) {
-        if (action.ordinal() > pendingRecoveryAction.ordinal()) {
+        if (action.ordinal() > pendingRecoveryAction.ordinal()
+                && action.ordinal() > activeRecoveryAction.ordinal()) {
             pendingRecoveryAction = action;
             pendingRecoveryReason = reason;
         }
