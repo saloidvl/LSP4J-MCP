@@ -1,55 +1,148 @@
 # LSP4J-MCP Server
 
-A Java MCP (Model Context Protocol) server that wraps JDTLS (Eclipse JDT Language Server) using LSP4J to provide Java IDE features to AI assistants like Claude.
+LSP4J-MCP is a Java MCP server for Java codebases. It wraps Eclipse JDT Language Server through LSP4J and exposes Java navigation and symbol-search tools to MCP clients.
 
-## Features
+The packaged entrypoint is now a local `launcher`, not the heavy analysis backend itself. The launcher keeps the MCP client contract on `stdio`, talks to a shared local `supervisor`, and reuses one `repo worker` plus one `JDTLS` process per repository.
 
-This MCP server exposes the following tools:
+## What It Is
+
+Use this server when you want an MCP-compatible client to inspect a Java repository through JDTLS-backed tools such as symbol lookup, reference search, go-to-definition, and document symbol listing.
+
+## Tools
 
 | Tool | Description |
 |------|-------------|
-| `find_symbols` | Search for Java symbols (classes, methods, fields) by name |
-| `find_references` | Find all references to a symbol at a given file location |
-| `find_definition` | Go to the definition of a symbol |
-| `document_symbols` | Get all symbols defined in a Java file |
-| `find_interfaces_with_method` | Find all interfaces containing a method with a given name |
+| `find_symbols` | Search for Java symbols by name |
+| `find_references` | Find references at a file location |
+| `find_definition` | Go to definition at a file location |
+| `document_symbols` | List symbols declared in one Java file |
+| `indexing_status` | Report whether JDTLS indexing is still in progress |
+| `find_interfaces_with_method` | Find interfaces containing a method name |
 
-## Prerequisites
+## Runtime Model
+
+```text
+MCP Client -> LauncherMain -> SupervisorMain -> RepoWorkerMain -> JDTLS -> Java workspace
+```
+
+Rules:
+
+- one local `supervisor` process per machine
+- one `repo worker` per active repository
+- one `JDTLS` process per active repository
+- many MCP clients can share the same repository worker
+
+This reduces duplicate indexing and prevents every agent or sub-agent from starting its own heavy backend for the same repo.
+
+The current IPC design is optimized for macOS and Linux:
+
+- MCP client to launcher: `stdio`
+- launcher to supervisor: Unix domain socket
+- launcher to repo worker: `127.0.0.1` TCP on an ephemeral port
+
+## Requirements
 
 - Java 21+
 - Maven 3.8+
-- JDTLS installed (e.g., via Homebrew: `brew install jdtls`)
+- JDTLS available on the machine where the worker runs
+- macOS or Linux recommended for the shared-runtime path
+
+## Installing JDTLS
+
+Homebrew on macOS:
+
+```bash
+brew install jdtls
+```
+
+If you do not use Homebrew, install Eclipse JDT Language Server from the official project and make sure the executable is available in `PATH`, or pass the full command as the last argument when starting the launcher.
 
 ## Build
+
+Normal development build:
 
 ```bash
 mvn clean package
 ```
 
-This creates a shaded JAR at `target/lsp4j-mcp-1.0.0-SNAPSHOT.jar`.
+This produces a shaded JAR in `target/`. Normal Maven builds do not publish artifacts into `dist/`.
 
-## Usage
+## Published Artifact
 
-### Option 1: Run Script
+The repository-managed binary lives in `dist/`, for example:
 
-```bash
-./run.sh /path/to/your/java/project
+```text
+dist/lsp4j-mcp-1.0.5-SNAPSHOT.jar
 ```
 
-### Option 2: Direct Java Command
+To publish a tracked binary into `dist/`, run:
 
 ```bash
-java -jar target/lsp4j-mcp-1.0.0-SNAPSHOT.jar <workspace-path> <jdtls-command>
+./scripts/bump-and-publish.sh <new-version>
 ```
 
-Example:
+This flow:
+
+- updates `pom.xml` to the requested version
+- builds the shaded JAR
+- copies it from `target/` into `dist/`
+- fails if `dist/lsp4j-mcp-<new-version>.jar` already exists
+
+## Running The Launcher
+
+With the tracked repository artifact:
+
 ```bash
-java -jar target/lsp4j-mcp-1.0.0-SNAPSHOT.jar /Users/me/projects/myapp jdtls
+./run.sh /path/to/java/workspace
 ```
 
-### Option 3: Claude Code MCP Configuration
+Direct invocation:
 
-Add to your `.mcp.json`:
+```bash
+java -jar /path/to/lsp4j-mcp/dist/lsp4j-mcp-<version>.jar /path/to/java/workspace jdtls
+```
+
+Arguments:
+
+1. Java workspace root to analyze
+2. JDTLS command to start, for example `jdtls`
+
+The launched process is `LauncherMain`. On the first connection for a repository it starts a shared local supervisor and a per-repository worker if needed. Later clients for the same repository reuse that worker and its single `JDTLS` process.
+
+## Connecting From Any MCP Client
+
+The MCP client contract is still a local process over `stdio`:
+
+```text
+command: java
+args:
+  - -jar
+  - /path/to/lsp4j-mcp/dist/lsp4j-mcp-<version>.jar
+  - /path/to/java/workspace
+  - jdtls
+transport: stdio
+```
+
+Example JSON-style configuration:
+
+```json
+{
+  "command": "java",
+  "args": [
+    "-jar",
+    "/path/to/lsp4j-mcp/dist/lsp4j-mcp-1.0.5-SNAPSHOT.jar",
+    "/path/to/java/workspace",
+    "jdtls"
+  ],
+  "env": {
+    "LOG_FILE": "/tmp/lsp4j-mcp.log"
+  }
+}
+```
+
+## Claude Code Example
+
+Add to `.mcp.json`:
 
 ```json
 {
@@ -58,8 +151,8 @@ Add to your `.mcp.json`:
       "command": "java",
       "args": [
         "-jar",
-        "/path/to/LSP4J-MCP/target/lsp4j-mcp-1.0.0-SNAPSHOT.jar",
-        "/path/to/your/java/project",
+        "/path/to/lsp4j-mcp/dist/lsp4j-mcp-1.0.5-SNAPSHOT.jar",
+        "/path/to/java/workspace",
         "jdtls"
       ],
       "env": {
@@ -70,129 +163,19 @@ Add to your `.mcp.json`:
 }
 ```
 
-## Project Structure
+## Development Notes
 
-```
-LSP4J-MCP/
-├── pom.xml                              # Maven build configuration
-├── run.sh                               # Startup script
-├── mcp-config.json                      # Example MCP configuration
-├── src/
-│   ├── main/
-│   │   ├── java/com/devoxx/lsp4jmcp/
-│   │   │   ├── client/
-│   │   │   │   ├── JdtlsClient.java         # LSP client for JDTLS
-│   │   │   │   └── JdtlsLanguageClient.java # LSP callback handler
-│   │   │   ├── tools/
-│   │   │   │   └── JavaTools.java           # Tool implementations
-│   │   │   └── server/
-│   │   │       └── McpServerMain.java       # MCP server entry point
-│   │   └── resources/
-│   │       └── logback.xml                  # Logging configuration
-│   └── test/
-│       └── java/com/devoxx/lsp4jmcp/
-│           ├── client/JdtlsClientTest.java
-│           ├── tools/JavaToolsTest.java
-│           └── server/McpServerMainTest.java
-└── README.md
-```
-
-## Testing
-
-Run all tests:
-```bash
-mvn test
-```
-
-## Dependencies
-
-- [LSP4J](https://github.com/eclipse-lsp4j/lsp4j) - Eclipse Language Server Protocol for Java
-- [MCP Java SDK](https://github.com/modelcontextprotocol/java-sdk) - Model Context Protocol SDK
-- [JDTLS](https://github.com/eclipse-jdtls/eclipse.jdt.ls) - Eclipse JDT Language Server
-
-## Example Prompts
-
-Once the MCP server is configured, you can ask your AI assistant questions that will trigger the LSP tools. Here are some examples:
-
-### Finding Symbols
-
-> "Find all classes named Repository in this project"
-
-> "Search for methods containing 'save' in their name"
-
-> "Where is the UserService class defined?"
-
-> "List all interfaces in this codebase"
-
-### Finding References
-
-> "Find all usages of the `processOrder` method at line 45 in OrderService.java"
-
-> "Where is the `CustomerRepository` interface used throughout the codebase?"
-
-> "Show me all places that call the constructor at line 12 of PaymentGateway.java"
-
-### Go to Definition
-
-> "What is the definition of the method being called at line 78, column 15 in CheckoutController.java?"
-
-> "Take me to the implementation of the interface method at line 23 in MyService.java"
-
-### Document Symbols
-
-> "List all methods and fields in the Customer.java file"
-
-> "What symbols are defined in src/main/java/com/example/service/OrderService.java?"
-
-> "Give me an overview of the structure of ConfigurationManager.java"
-
-### Finding Interface Methods
-
-> "Which interfaces define a method called 'findById'?"
-
-> "Find all classes that have a method named 'process'"
-
-> "Show me all interfaces containing the 'validate' method"
-
-### Complex Queries
-
-> "I need to understand how the `authenticate` method works. First find its definition, then show me all places it's called."
-
-> "Refactor help: Find all usages of the deprecated `legacyProcess` method so I can update them"
-
-> "I want to implement a new Repository interface. Show me all existing Repository interfaces and their methods."
+- Production code lives under `src/main/java/com/saloidvl/lsp4jmcp/`
+- `target/` is build output only
+- `dist/` is reserved for tracked published JARs
+- Run tests with `mvn test`
+- `JdtlsClientIntegrationTest` requires `JDTLS_PATH` to be set
 
 ## Logging
 
-Logs are written to the file specified by the `LOG_FILE` environment variable (default: `/tmp/lsp4j-mcp.log`).
+Logs are written to `LOG_FILE` if provided, otherwise to `/tmp/lsp4j-mcp.log`.
 
-Note: stdout is reserved for MCP protocol communication, so all logging goes to file.
-
-## Architecture
-
-```
-Claude Code ──MCP──▶ McpServerMain ──LSP4J──▶ JDTLS ──▶ Java Codebase
-                         │
-                         ▼
-                    JavaTools
-                    (find_symbols, find_references, etc.)
-```
-
-The server:
-1. Starts JDTLS as a subprocess
-2. Connects via LSP4J (JSON-RPC over stdio)
-3. Exposes LSP features as MCP tools
-4. Communicates with Claude Code via MCP protocol
-
-## Examples using Claude Code
-
-<img width="896" height="699" alt="Screenshot 2026-01-05 at 12 36 32" src="https://github.com/user-attachments/assets/1267f89c-e70c-4be0-9894-fed1dd387364" />
-
-<img width="1656" height="465" alt="Screenshot 2026-01-05 at 13 43 55" src="https://github.com/user-attachments/assets/6974fd07-4d20-47ba-9aa8-79e89024e355" />
-
-<img width="1656" height="225" alt="Screenshot 2026-01-05 at 13 44 02" src="https://github.com/user-attachments/assets/e6ae4175-db81-4114-b4de-ef8aa6574723" />
-
-<img width="1249" height="581" alt="Screenshot 2026-01-05 at 12 34 09" src="https://github.com/user-attachments/assets/00d6932a-7cf8-4e4c-903d-b78bd597b188" />
+`stdout` is reserved for MCP protocol traffic between the MCP client and launcher, so diagnostic logs should go to the log file, not to standard output.
 
 ## License
 

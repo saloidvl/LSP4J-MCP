@@ -1,15 +1,42 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <configuration>
     <!-- Log to file only - stdout is used for MCP protocol -->
-    <appender name="FILE" class="ch.qos.logback.core.FileAppender">
+    <appender name="FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
         <file>${LOG_FILE:-/tmp/lsp4j-mcp.log}</file>
+        <rollingPolicy class="ch.qos.logback.core.rolling.FixedWindowRollingPolicy">
+            <fileNamePattern>${LOG_FILE:-/tmp/lsp4j-mcp.log}.%i</fileNamePattern>
+            <minIndex>1</minIndex>
+            <maxIndex>1</maxIndex>
+        </rollingPolicy>
+        <triggeringPolicy class="ch.qos.logback.core.rolling.SizeBasedTriggeringPolicy">
+            <maxFileSize>50MB</maxFileSize>
+        </triggeringPolicy>
+        <encoder>
+            <pattern>%d{HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n</pattern>
+        </encoder>
+    </appender>
+
+    <!-- Errors only -->
+    <appender name="FILE_ERROR" class="ch.qos.logback.core.rolling.RollingFileAppender">
+        <file>${LOG_FILE:-/tmp/lsp4j-mcp.log}.error</file>
+        <filter class="ch.qos.logback.classic.filter.ThresholdFilter">
+            <level>ERROR</level>
+        </filter>
+        <rollingPolicy class="ch.qos.logback.core.rolling.FixedWindowRollingPolicy">
+            <fileNamePattern>${LOG_FILE:-/tmp/lsp4j-mcp.log}.error.%i</fileNamePattern>
+            <minIndex>1</minIndex>
+            <maxIndex>1</maxIndex>
+        </rollingPolicy>
+        <triggeringPolicy class="ch.qos.logback.core.rolling.SizeBasedTriggeringPolicy">
+            <maxFileSize>10MB</maxFileSize>
+        </triggeringPolicy>
         <encoder>
             <pattern>%d{HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n</pattern>
         </encoder>
     </appender>
 
     <!-- Our code at DEBUG level -->
-    <logger name="com.devoxx.lsp4jmcp" level="DEBUG"/>
+    <logger name="com.saloidvl.lsp4jmcp" level="DEBUG"/>
 
     <!-- JDTLS and LSP4J can be noisy -->
     <logger name="org.eclipse.lsp4j" level="INFO"/>
@@ -17,5 +44,6 @@
 
     <root level="INFO">
         <appender-ref ref="FILE"/>
+        <appender-ref ref="FILE_ERROR"/>
     </root>
 </configuration>

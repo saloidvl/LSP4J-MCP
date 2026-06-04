@@ -1,57 +1,83 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to coding agents working in this repository.
 
 ## Project Overview
 
-LSP4J-MCP is a Java MCP (Model Context Protocol) server that wraps JDTLS (Eclipse JDT Language Server) using LSP4J to provide Java IDE features to AI assistants. It exposes LSP capabilities (symbol search, find references, go-to-definition) as MCP tools.
+LSP4J-MCP is a Java MCP server for Java repositories. The packaged entrypoint is `LauncherMain`, which keeps the client-facing `stdio` contract but reuses a shared backend per repository.
 
-## Build and Run Commands
+## Build, Test, And Run
 
 ```bash
-# Build shaded JAR
+# Normal development build output in target/
 mvn clean package
 
-# Run tests
+# Run all tests
 mvn test
 
 # Run a single test class
 mvn test -Dtest=JavaToolsTest
 
-# Run a single test method
-mvn test -Dtest=JavaToolsTest#testFindSymbols
+# Publish a tracked repository artifact into dist/
+./scripts/bump-and-publish.sh <new-version>
 
-# Run the server (requires JDTLS installed)
+# Run the launcher with the tracked artifact
 ./run.sh /path/to/java/project
-# or directly:
-java -jar target/lsp4j-mcp-1.0.0-SNAPSHOT.jar <workspace-path> jdtls
+
+# Or invoke the tracked jar directly
+java -jar dist/lsp4j-mcp-<version>.jar <workspace-path> jdtls
 ```
+
+## Artifact Layout
+
+- `target/` contains normal Maven build output
+- `dist/` contains versioned JARs intentionally tracked in git
+- `scripts/bump-and-publish.sh` updates `pom.xml`, builds the project, copies the shaded JAR into `dist/`, and fails if the requested version already exists
 
 ## Architecture
 
+```text
+MCP Client -> LauncherMain -> SupervisorMain -> RepoWorkerMain -> JDTLS -> Java workspace
 ```
-Claude Code ──MCP──▶ McpServerMain ──LSP4J──▶ JDTLS subprocess ──▶ Java Codebase
-```
 
-**Three-layer design:**
-1. **McpServerMain** - Entry point, MCP server setup, tool registration
-2. **JavaTools** - Translates MCP tool calls to LSP operations, formats JSON responses
-3. **JdtlsClient/JdtlsLanguageClient** - LSP4J client managing JDTLS subprocess
+Runtime rules:
 
-**Key design decisions:**
-- JDTLS runs as subprocess with JSON-RPC over stdio
-- JDTLS workspace data stored in `/tmp/jdtls-data/<hash>/` (must be outside analyzed workspace)
-- Stdout reserved for MCP protocol; all logging goes to `$LOG_FILE` (default: `/tmp/lsp4j-mcp.log`)
-- Synchronous MCP server (`McpSyncServer`) for simpler request handling
-- 120-second timeout for JDTLS initialization and operations
+1. `LauncherMain` is the shaded-jar entry point used by MCP clients.
+2. `SupervisorMain` is a machine-local coordinator reached over a Unix domain socket.
+3. `RepoWorkerMain` is one backend process per active repository.
+4. Each repo worker owns one `JdtlsClient` and one `JDTLS` subprocess.
+5. Multiple agents targeting the same repository should reuse one worker and one `JDTLS`.
 
-**MCP Tools exposed:**
-- `find_symbols` - Two-step search: workspace symbols + document symbols per file
-- `find_references` - Find all references to symbol at file:line:character
-- `find_definition` - Go to definition of symbol
-- `document_symbols` - List all symbols in a file
-- `find_interfaces_with_method` - Find classes/interfaces containing a method
+## Key Design Decisions
 
-## Testing
+- Keep the MCP client contract on `stdio`
+- Use Unix domain sockets for launcher-to-supervisor control traffic
+- Use localhost TCP for launcher-to-worker data traffic
+- Keep all lifecycle timings in `RuntimeConstants`
+- Store JDTLS workspace data under `/tmp/jdtls-data/<hash>/` to avoid overlapping the analyzed workspace
+- Keep `stdout` reserved for MCP traffic and send logs to `LOG_FILE` or `/tmp/lsp4j-mcp.log`
+- Load server version from filtered Maven build metadata in `src/main/resources/build-info.properties`
 
-Uses JUnit 5 with AssertJ and Mockito. Integration test `JdtlsClientIntegrationTest` requires JDTLS to be installed.
+## Main Components
+
+- `JavaMcpServer` - shared MCP server bootstrap on arbitrary input/output streams
+- `JdtlsClient` and `JdtlsLanguageClient` - JDTLS startup, indexing, readiness, and progress tracking
+- `WorkerRegistry` - per-repository worker metadata, leases, and idle bookkeeping
+- `WorkerProcessLauncher` - starts repo workers inside the current JVM/classpath environment
+- `SupervisorClient` - launcher-side client for acquire, heartbeat, and release
+
+## MCP Tools
+
+- `find_symbols` - Search for Java symbols by name
+- `find_references` - Find all references to a symbol at file, line, and character
+- `find_definition` - Go to the definition of a symbol at file, line, and character
+- `document_symbols` - List symbols defined in a Java file
+- `indexing_status` - Report whether JDTLS indexing is still in progress
+- `find_interfaces_with_method` - Find interfaces containing a method with the given name
+
+## Testing Notes
+
+- Unit tests use JUnit 5, AssertJ, and Mockito
+- Test resources pin Mockito to the subclass mock maker so the suite stays stable on the current JDK in this environment
+- `JdtlsClientIntegrationTest` is guarded by `JDTLS_PATH` and is skipped unless JDTLS is explicitly configured
+- `RepoWorkerMainTest`, `WorkerRegistryTest`, `SupervisorMainIntegrationTest`, and `LauncherMainIntegrationTest` cover the shared-runtime pieces without requiring a real JDTLS install
