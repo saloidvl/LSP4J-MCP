@@ -27,6 +27,7 @@ public class JdtlsLanguageClient implements LanguageClient {
     private final AtomicInteger lastLoggedPct = new AtomicInteger(-1);
     private final AtomicInteger diagnosticsBatchCount = new AtomicInteger();
     private final AtomicInteger diagnosticsEntryCount = new AtomicInteger();
+    private volatile DiagnosticsCache diagnosticsCache;
     private volatile Consumer<String> recoverySignalHandler = reason -> {};
     private volatile Consumer<LanguageClientSnapshot> statusListener = snapshot -> {};
 
@@ -136,6 +137,10 @@ public class JdtlsLanguageClient implements LanguageClient {
         this.statusListener = Objects.requireNonNull(listener);
     }
 
+    public void setDiagnosticsCache(DiagnosticsCache cache) {
+        this.diagnosticsCache = cache;
+    }
+
     private LanguageClientSnapshot snapshot() {
         return new LanguageClientSnapshot(ready, currentStatus, progressMessage, progressPct);
     }
@@ -168,6 +173,9 @@ public class JdtlsLanguageClient implements LanguageClient {
     public void publishDiagnostics(PublishDiagnosticsParams diagnostics) {
         diagnosticsBatchCount.incrementAndGet();
         diagnosticsEntryCount.addAndGet(diagnostics.getDiagnostics().size());
+        if (diagnosticsCache != null) {
+            diagnosticsCache.update(diagnostics.getUri(), diagnostics.getDiagnostics());
+        }
     }
 
     @Override

@@ -1,19 +1,29 @@
 package com.saloidvl.lsp4jmcp.tools;
 
+import com.saloidvl.lsp4jmcp.client.DiagnosticsCache;
 import com.saloidvl.lsp4jmcp.client.JdtlsClient;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
+import com.google.gson.JsonObject;
+import org.eclipse.lsp4j.Diagnostic;
 import org.eclipse.lsp4j.DocumentSymbol;
+import org.eclipse.lsp4j.Hover;
 import org.eclipse.lsp4j.Location;
+import org.eclipse.lsp4j.MarkedString;
+import org.eclipse.lsp4j.MarkupContent;
+import org.eclipse.lsp4j.Range;
 import org.eclipse.lsp4j.SymbolInformation;
+import org.eclipse.lsp4j.jsonrpc.messages.Either;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.stream.Collectors;
 
@@ -22,7 +32,7 @@ import java.util.stream.Collectors;
  */
 public class JavaTools {
     private static final Logger LOG = LoggerFactory.getLogger(JavaTools.class);
-    private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
+    private static final Gson GSON = new GsonBuilder().serializeNulls().setPrettyPrinting().create();
 
     private final JdtlsClient client;
     private final Path workspaceRoot;
@@ -159,6 +169,170 @@ public class JavaTools {
         }
     }
 
+    public String findImplementations(String filePath, int line, int character) {
+        try {
+            String uri = toUri(filePath);
+            LOG.info("Finding implementations at {}:{}:{}", filePath, line, character);
+
+            List<? extends Location> locations = client.findImplementations(uri, line - 1, character - 1);
+            boolean found = locations != null;
+            List<LocationResult> results = found
+                ? locations.stream().map(this::toLocationResult).toList()
+                : List.of();
+
+            return GSON.toJson(Map.of(
+                "found", found,
+                "count", results.size(),
+                "implementations", results
+            ));
+        } catch (Exception e) {
+            LOG.error("Error finding implementations", e);
+            return GSON.toJson(Map.of("error", e.getMessage()));
+        }
+    }
+
+    public String getHover(String filePath, int line, int character) {
+        try {
+            String uri = toUri(filePath);
+            LOG.info("Getting hover at {}:{}:{}", filePath, line, character);
+
+            Hover hover = client.getHover(uri, line - 1, character - 1);
+            Map<String, Object> response = new LinkedHashMap<>();
+            if (hover == null) {
+                response.put("found", false);
+                response.put("content", null);
+                return GSON.toJson(response);
+            }
+
+            response.put("found", true);
+            response.put("content", extractHoverContent(hover));
+            if (hover.getRange() != null) {
+                response.put("range", toRangeMap(hover.getRange()));
+            }
+            return GSON.toJson(response);
+        } catch (Exception e) {
+            LOG.error("Error getting hover", e);
+            return GSON.toJson(Map.of("error", e.getMessage()));
+        }
+    }
+
+    public String findIncomingCalls(String filePath, int line, int character) {
+        try {
+            String uri = toUri(filePath);
+            LOG.info("Finding incoming calls at {}:{}:{}", filePath, line, character);
+
+            List<? extends Location> locations = client.findIncomingCalls(uri, line - 1, character - 1);
+            return buildCallsResponse(locations);
+        } catch (Exception e) {
+            LOG.error("Error finding incoming calls", e);
+            return GSON.toJson(Map.of("error", e.getMessage()));
+        }
+    }
+
+    public String findOutgoingCalls(String filePath, int line, int character) {
+        try {
+            String uri = toUri(filePath);
+            LOG.info("Finding outgoing calls at {}:{}:{}", filePath, line, character);
+
+            List<? extends Location> locations = client.findOutgoingCalls(uri, line - 1, character - 1);
+            return buildCallsResponse(locations);
+        } catch (Exception e) {
+            LOG.error("Error finding outgoing calls", e);
+            return GSON.toJson(Map.of("error", e.getMessage()));
+        }
+    }
+
+    public String getDiagnostics(Boolean summaryOnly, String filePath) {
+        try {
+            DiagnosticsCache cache = client.getDiagnosticsCache();
+            long updatedAtMs = cache.getLastUpdatedMs();
+
+            if (filePath != null) {
+                String uri = toUri(filePath);
+                Optional<DiagnosticsCache.Entry> entry = cache.getForUri(uri);
+                Map<String, Object> response = new LinkedHashMap<>();
+                response.put("file", filePath);
+                response.put("diagnostics", entry.map(e -> e.diagnostics()).orElse(List.of())
+                    .stream().map(this::toDiagnosticMap).toList());
+                response.put("cached", true);
+                response.put("timestamp", entry.map(e -> e.timestamp().toString()).orElse(null));
+                response.put("cache_updated_at_ms", updatedAtMs);
+                return GSON.toJson(response);
+            }
+
+            if (Boolean.TRUE.equals(summaryOnly)) {
+                List<Map<String, Object>> files = cache.getSummary().entrySet().stream()
+                    .map(e -> {
+                        Map<String, Object> file = new LinkedHashMap<>();
+                        file.put("file", uriToPath(e.getKey()));
+                        file.put("errors", e.getValue().errors());
+                        file.put("warnings", e.getValue().warnings());
+                        return file;
+                    }).toList();
+                Map<String, Object> response = new LinkedHashMap<>();
+                response.put("files", files);
+                response.put("cached", true);
+                response.put("cache_updated_at_ms", updatedAtMs);
+                return GSON.toJson(response);
+            }
+
+            List<Map<String, Object>> files = cache.getAll().entrySet().stream()
+                .map(e -> {
+                    Map<String, Object> file = new LinkedHashMap<>();
+                    file.put("file", uriToPath(e.getKey()));
+                    file.put("diagnostics", e.getValue().diagnostics().stream()
+                        .map(this::toDiagnosticMap).toList());
+                    return file;
+                }).toList();
+            Map<String, Object> response = new LinkedHashMap<>();
+            response.put("files", files);
+            response.put("cached", true);
+            response.put("cache_updated_at_ms", updatedAtMs);
+            return GSON.toJson(response);
+        } catch (Exception e) {
+            LOG.error("Error getting diagnostics", e);
+            return GSON.toJson(Map.of("error", e.getMessage()));
+        }
+    }
+
+    public String refreshDiagnostics() {
+        try {
+            long start = System.currentTimeMillis();
+            client.buildWorkspace();
+            long durationMs = System.currentTimeMillis() - start;
+            return GSON.toJson(Map.of(
+                "status", "ok",
+                "build_duration_ms", durationMs
+            ));
+        } catch (Exception e) {
+            LOG.error("Error refreshing diagnostics", e);
+            return GSON.toJson(Map.of("error", e.getMessage()));
+        }
+    }
+
+    public String resolveStackTrace(String stackFrame) {
+        try {
+            Object raw = client.resolveStackTraceLocation(stackFrame);
+            if (raw == null) {
+                return GSON.toJson(notFoundStackTraceResponse());
+            }
+
+            JsonObject obj = GSON.toJsonTree(raw).getAsJsonObject();
+            if (!obj.has("uri")) {
+                return GSON.toJson(notFoundStackTraceResponse());
+            }
+
+            String file = uriToPath(obj.get("uri").getAsString());
+            int line = obj.getAsJsonObject("range")
+                .getAsJsonObject("start")
+                .get("line").getAsInt() + 1;
+            return GSON.toJson(Map.of("file", file, "line", line));
+        } catch (Exception e) {
+            LOG.error("Error resolving stack trace", e);
+            return GSON.toJson(Map.of("error", e.getMessage()));
+        }
+    }
+
     /**
      * Get all symbols defined in a document.
      */
@@ -288,6 +462,60 @@ public class JavaTools {
             loc.getRange().getEnd().getLine() + 1,
             loc.getRange().getEnd().getCharacter() + 1
         );
+    }
+
+    private String extractHoverContent(Hover hover) {
+        Either<List<Either<String, MarkedString>>, MarkupContent> contents = hover.getContents();
+        if (contents == null) {
+            return "";
+        }
+        if (contents.isRight()) {
+            return contents.getRight().getValue();
+        }
+        return contents.getLeft().stream()
+            .map(e -> e.isLeft() ? e.getLeft() : e.getRight().getValue())
+            .collect(Collectors.joining("\n\n"));
+    }
+
+    private Map<String, Integer> toRangeMap(Range range) {
+        Map<String, Integer> result = new LinkedHashMap<>();
+        result.put("startLine", range.getStart().getLine() + 1);
+        result.put("startCharacter", range.getStart().getCharacter() + 1);
+        result.put("endLine", range.getEnd().getLine() + 1);
+        result.put("endCharacter", range.getEnd().getCharacter() + 1);
+        return result;
+    }
+
+    private String buildCallsResponse(List<? extends Location> locations) {
+        boolean found = locations != null;
+        List<LocationResult> results = found
+            ? locations.stream().map(this::toLocationResult).toList()
+            : List.of();
+        return GSON.toJson(Map.of(
+            "found", found,
+            "count", results.size(),
+            "calls", results
+        ));
+    }
+
+    private Map<String, Object> toDiagnosticMap(Diagnostic diagnostic) {
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("severity", diagnostic.getSeverity() != null ? diagnostic.getSeverity().name() : "Unknown");
+        result.put("message", diagnostic.getMessage());
+        result.put("line", diagnostic.getRange().getStart().getLine() + 1);
+        result.put("character", diagnostic.getRange().getStart().getCharacter() + 1);
+        if (diagnostic.getCode() != null && diagnostic.getCode().isLeft()) {
+            result.put("code", diagnostic.getCode().getLeft());
+        }
+        return result;
+    }
+
+    private Map<String, Object> notFoundStackTraceResponse() {
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("file", null);
+        result.put("line", null);
+        result.put("message", "not found");
+        return result;
     }
 
     private DocumentSymbolResult toDocumentSymbolResult(DocumentSymbol ds) {

@@ -16,6 +16,7 @@ public final class RuntimeConstants {
     public static final Duration JDTLS_SELF_EXIT_POLL_TIMEOUT = Duration.ofSeconds(10);
     public static final Duration JDTLS_RECOVERY_COOLDOWN = Duration.ofSeconds(30);
     public static final Duration JDTLS_RECOVERY_WINDOW = Duration.ofMinutes(5);
+    public static final long BUILD_TIMEOUT_SECONDS = 300;
     public static final int JDTLS_MAX_RECOVERY_ATTEMPTS = 3;
 
     private RuntimeConstants() {

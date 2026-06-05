@@ -6,7 +6,7 @@
 
     <groupId>com.saloidvl</groupId>
     <artifactId>lsp4j-mcp</artifactId>
-    <version>1.0.6-SNAPSHOT</version>
+    <version>1.0.6</version>
     <packaging>jar</packaging>
 
     <name>LSP4J MCP Server</name>

@@ -50,7 +50,14 @@ class JavaMcpServerTest {
             "indexing_status",
             "find_interfaces_with_method",
             "restart_jdtls",
-            "reindex_workspace"
+            "reindex_workspace",
+            "find_implementations",
+            "get_hover",
+            "find_incoming_calls",
+            "find_outgoing_calls",
+            "get_diagnostics",
+            "refresh_diagnostics",
+            "resolve_stack_trace"
         ));
     }
 }

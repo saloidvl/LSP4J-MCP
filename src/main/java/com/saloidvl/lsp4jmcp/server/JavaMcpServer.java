@@ -27,7 +27,14 @@ public final class JavaMcpServer {
         "indexing_status",
         "find_interfaces_with_method",
         "restart_jdtls",
-        "reindex_workspace"
+        "reindex_workspace",
+        "find_implementations",
+        "get_hover",
+        "find_incoming_calls",
+        "find_outgoing_calls",
+        "get_diagnostics",
+        "refresh_diagnostics",
+        "resolve_stack_trace"
     );
 
     private JavaMcpServer() {
@@ -191,6 +198,160 @@ public final class JavaMcpServer {
                 (exchange, request) -> CallToolResult.builder()
                     .addTextContent(runRecovery(() -> jdtlsClient.reindexWorkspace()))
                     .build())
+
+            .toolCall(
+                Tool.builder()
+                    .name("find_implementations")
+                    .description("Find all implementations of an interface method or abstract method at the given position.")
+                    .inputSchema(objectMapper.readValue("""
+                    {
+                      "type": "object",
+                      "properties": {
+                        "file": { "type": "string", "description": "Absolute path to the Java file" },
+                        "line": { "type": "integer", "description": "1-based line number" },
+                        "character": { "type": "integer", "description": "1-based character offset" }
+                      },
+                      "required": ["file", "line", "character"]
+                    }
+                    """, McpSchema.JsonSchema.class))
+                    .build(),
+                (exchange, request) ->
+                    CallToolResult.builder()
+                        .addTextContent(javaTools.findImplementations(
+                            (String) request.arguments().get("file"),
+                            ((Number) request.arguments().get("line")).intValue(),
+                            ((Number) request.arguments().get("character")).intValue()))
+                        .build())
+
+            .toolCall(
+                Tool.builder()
+                    .name("get_hover")
+                    .description("Get hover information, such as type signature and Javadoc, for the symbol at the given position.")
+                    .inputSchema(objectMapper.readValue("""
+                    {
+                      "type": "object",
+                      "properties": {
+                        "file": { "type": "string", "description": "Absolute path to the Java file" },
+                        "line": { "type": "integer", "description": "1-based line number" },
+                        "character": { "type": "integer", "description": "1-based character offset" }
+                      },
+                      "required": ["file", "line", "character"]
+                    }
+                    """, McpSchema.JsonSchema.class))
+                    .build(),
+                (exchange, request) ->
+                    CallToolResult.builder()
+                        .addTextContent(javaTools.getHover(
+                            (String) request.arguments().get("file"),
+                            ((Number) request.arguments().get("line")).intValue(),
+                            ((Number) request.arguments().get("character")).intValue()))
+                        .build())
+
+            .toolCall(
+                Tool.builder()
+                    .name("find_incoming_calls")
+                    .description("Find all call sites where the method at the given position is called from.")
+                    .inputSchema(objectMapper.readValue("""
+                    {
+                      "type": "object",
+                      "properties": {
+                        "file": { "type": "string", "description": "Absolute path to the Java file" },
+                        "line": { "type": "integer", "description": "1-based line number" },
+                        "character": { "type": "integer", "description": "1-based character offset" }
+                      },
+                      "required": ["file", "line", "character"]
+                    }
+                    """, McpSchema.JsonSchema.class))
+                    .build(),
+                (exchange, request) ->
+                    CallToolResult.builder()
+                        .addTextContent(javaTools.findIncomingCalls(
+                            (String) request.arguments().get("file"),
+                            ((Number) request.arguments().get("line")).intValue(),
+                            ((Number) request.arguments().get("character")).intValue()))
+                        .build())
+
+            .toolCall(
+                Tool.builder()
+                    .name("find_outgoing_calls")
+                    .description("Find all methods called by the method at the given position.")
+                    .inputSchema(objectMapper.readValue("""
+                    {
+                      "type": "object",
+                      "properties": {
+                        "file": { "type": "string", "description": "Absolute path to the Java file" },
+                        "line": { "type": "integer", "description": "1-based line number" },
+                        "character": { "type": "integer", "description": "1-based character offset" }
+                      },
+                      "required": ["file", "line", "character"]
+                    }
+                    """, McpSchema.JsonSchema.class))
+                    .build(),
+                (exchange, request) ->
+                    CallToolResult.builder()
+                        .addTextContent(javaTools.findOutgoingCalls(
+                            (String) request.arguments().get("file"),
+                            ((Number) request.arguments().get("line")).intValue(),
+                            ((Number) request.arguments().get("character")).intValue()))
+                        .build())
+
+            .toolCall(
+                Tool.builder()
+                    .name("get_diagnostics")
+                    .description("Return cached diagnostics from the last JDTLS build. Use file for one file, or summary_only for per-file counts.")
+                    .inputSchema(objectMapper.readValue("""
+                    {
+                      "type": "object",
+                      "properties": {
+                        "summary_only": { "type": "boolean", "description": "Return only error/warning counts per file" },
+                        "file": { "type": "string", "description": "Absolute path to filter to a single file" }
+                      }
+                    }
+                    """, McpSchema.JsonSchema.class))
+                    .build(),
+                (exchange, request) -> {
+                    Boolean summaryOnly = (Boolean) request.arguments().get("summary_only");
+                    String file = (String) request.arguments().get("file");
+                    return CallToolResult.builder()
+                        .addTextContent(javaTools.getDiagnostics(summaryOnly, file))
+                        .build();
+                })
+
+            .toolCall(
+                Tool.builder()
+                    .name("refresh_diagnostics")
+                    .description("Trigger a full workspace build and wait for completion so cached diagnostics can refresh.")
+                    .inputSchema(objectMapper.readValue("""
+                    {"type": "object", "properties": {}}
+                    """, McpSchema.JsonSchema.class))
+                    .build(),
+                (exchange, request) ->
+                    CallToolResult.builder()
+                        .addTextContent(javaTools.refreshDiagnostics())
+                        .build())
+
+            .toolCall(
+                Tool.builder()
+                    .name("resolve_stack_trace")
+                    .description("Resolve a Java stack frame to its source file and line number.")
+                    .inputSchema(objectMapper.readValue("""
+                    {
+                      "type": "object",
+                      "properties": {
+                        "stack_frame": {
+                          "type": "string",
+                          "description": "Full Java stack frame line, for example 'at com.example.Foo.bar(Foo.java:42)'"
+                        }
+                      },
+                      "required": ["stack_frame"]
+                    }
+                    """, McpSchema.JsonSchema.class))
+                    .build(),
+                (exchange, request) ->
+                    CallToolResult.builder()
+                        .addTextContent(javaTools.resolveStackTrace(
+                            (String) request.arguments().get("stack_frame")))
+                        .build())
 
             .build();
     }

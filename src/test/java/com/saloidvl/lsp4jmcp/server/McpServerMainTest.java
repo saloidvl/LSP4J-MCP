@@ -27,7 +27,14 @@ class McpServerMainTest {
         "indexing_status",
         "find_interfaces_with_method",
         "restart_jdtls",
-        "reindex_workspace"
+        "reindex_workspace",
+        "find_implementations",
+        "get_hover",
+        "find_incoming_calls",
+        "find_outgoing_calls",
+        "get_diagnostics",
+        "refresh_diagnostics",
+        "resolve_stack_trace"
     );
 
     @Test
@@ -182,7 +189,7 @@ class McpServerMainTest {
                 .matches("[a-z_]+")
                 .as("Tool name should be snake_case: " + toolName);
         }
-        assertThat(EXPECTED_TOOL_NAMES).hasSize(8);
+        assertThat(EXPECTED_TOOL_NAMES).hasSize(15);
     }
 
     @Test
@@ -348,9 +355,9 @@ class McpServerMainTest {
     }
 
     @Test
-    void expectedToolCount_isEight() {
-        // Verify we have exactly 8 tools registered
-        assertThat(EXPECTED_TOOL_NAMES).hasSize(8);
+    void expectedToolCount_isFifteen() {
+        // Verify we have exactly 15 tools registered
+        assertThat(EXPECTED_TOOL_NAMES).hasSize(15);
         assertThat(JavaMcpServer.registeredToolNames()).containsExactlyInAnyOrderElementsOf(EXPECTED_TOOL_NAMES);
     }
 
@@ -366,5 +373,12 @@ class McpServerMainTest {
         assertThat(EXPECTED_TOOL_NAMES).contains("find_interfaces_with_method");  // -> findInterfacesWithMethod
         assertThat(EXPECTED_TOOL_NAMES).contains("restart_jdtls");
         assertThat(EXPECTED_TOOL_NAMES).contains("reindex_workspace");
+        assertThat(EXPECTED_TOOL_NAMES).contains("find_implementations");  // -> findImplementations
+        assertThat(EXPECTED_TOOL_NAMES).contains("get_hover");  // -> getHover
+        assertThat(EXPECTED_TOOL_NAMES).contains("find_incoming_calls");  // -> findIncomingCalls
+        assertThat(EXPECTED_TOOL_NAMES).contains("find_outgoing_calls");  // -> findOutgoingCalls
+        assertThat(EXPECTED_TOOL_NAMES).contains("get_diagnostics");  // -> getDiagnostics
+        assertThat(EXPECTED_TOOL_NAMES).contains("refresh_diagnostics");  // -> refreshDiagnostics
+        assertThat(EXPECTED_TOOL_NAMES).contains("resolve_stack_trace");  // -> resolveStackTrace
     }
 }

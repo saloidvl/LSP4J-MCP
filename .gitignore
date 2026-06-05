@@ -16,9 +16,6 @@
 # Maven
 target/
 dist/
-!dist/
-!dist/.gitkeep
-!dist/*.jar
 pom.xml.tag
 pom.xml.releaseBackup
 pom.xml.versionsBackup

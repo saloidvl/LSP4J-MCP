@@ -75,6 +75,7 @@ public class JdtlsClient implements AutoCloseable {
     private final String jdtlsCommand;
     private final RuntimeSessionFactory sessionFactory;
     private final JdtlsLanguageClient languageClient;
+    private final DiagnosticsCache diagnosticsCache;
     private final Object stateLock = new Object();
     private final AtomicLong generationCounter = new AtomicLong();
     private final Set<Long> intentionallyClosingGenerations = ConcurrentHashMap.newKeySet();
@@ -109,14 +110,21 @@ public class JdtlsClient implements AutoCloseable {
     long selfExitPollMs = RuntimeConstants.JDTLS_SELF_EXIT_POLL_TIMEOUT.toMillis();
 
     public JdtlsClient(Path workspaceRoot, String jdtlsCommand) throws IOException {
-        this(workspaceRoot, jdtlsCommand, defaultRuntimeSessionFactory());
+        this(workspaceRoot, jdtlsCommand, defaultRuntimeSessionFactory(), new DiagnosticsCache());
     }
 
     JdtlsClient(Path workspaceRoot, String jdtlsCommand, RuntimeSessionFactory sessionFactory) throws IOException {
+        this(workspaceRoot, jdtlsCommand, sessionFactory, new DiagnosticsCache());
+    }
+
+    JdtlsClient(Path workspaceRoot, String jdtlsCommand, RuntimeSessionFactory sessionFactory,
+                DiagnosticsCache diagnosticsCache) throws IOException {
         this.workspaceRoot = workspaceRoot;
         this.jdtlsCommand = jdtlsCommand;
         this.sessionFactory = sessionFactory;
+        this.diagnosticsCache = diagnosticsCache;
         this.languageClient = new JdtlsLanguageClient();
+        this.languageClient.setDiagnosticsCache(diagnosticsCache);
         String workspaceHash = Integer.toHexString(workspaceRoot.toString().hashCode());
         this.dataDir = Path.of(System.getProperty("java.io.tmpdir"), "jdtls-data", workspaceHash);
         Files.createDirectories(this.dataDir);
@@ -527,6 +535,97 @@ public class JdtlsClient implements AutoCloseable {
         }));
     }
 
+    public List<? extends Location> findImplementations(String uri, int line, int character)
+        throws ExecutionException, InterruptedException, TimeoutException, IOException {
+        return withDiagnosticsSummary(() -> withRuntimeRecovery(() -> {
+            ensureAvailableForRequests();
+            RuntimeSession current = requireSession();
+            ensureDocumentOpen(current, uri);
+            ImplementationParams params = new ImplementationParams(
+                new TextDocumentIdentifier(uri),
+                new Position(line, character)
+            );
+            var result = current.languageServer().getTextDocumentService()
+                .implementation(params).get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            if (result == null) {
+                return null;
+            }
+            return result.isLeft() ? result.getLeft() : List.<Location>of();
+        }));
+    }
+
+    public Hover getHover(String uri, int line, int character)
+        throws ExecutionException, InterruptedException, TimeoutException, IOException {
+        return withDiagnosticsSummary(() -> withRuntimeRecovery(() -> {
+            ensureAvailableForRequests();
+            RuntimeSession current = requireSession();
+            ensureDocumentOpen(current, uri);
+            HoverParams params = new HoverParams(
+                new TextDocumentIdentifier(uri),
+                new Position(line, character)
+            );
+            return current.languageServer().getTextDocumentService()
+                .hover(params).get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        }));
+    }
+
+    public List<? extends Location> findIncomingCalls(String uri, int line, int character)
+        throws ExecutionException, InterruptedException, TimeoutException, IOException {
+        return withDiagnosticsSummary(() -> withRuntimeRecovery(() -> {
+            ensureAvailableForRequests();
+            RuntimeSession current = requireSession();
+            ensureDocumentOpen(current, uri);
+            CallHierarchyPrepareParams prepareParams = new CallHierarchyPrepareParams(
+                new TextDocumentIdentifier(uri),
+                new Position(line, character)
+            );
+            List<CallHierarchyItem> items = current.languageServer().getTextDocumentService()
+                .prepareCallHierarchy(prepareParams).get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            if (items == null || items.isEmpty()) {
+                return null;
+            }
+            CallHierarchyIncomingCallsParams incomingParams =
+                new CallHierarchyIncomingCallsParams(items.get(0));
+            List<CallHierarchyIncomingCall> calls = current.languageServer().getTextDocumentService()
+                .callHierarchyIncomingCalls(incomingParams).get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            if (calls == null) {
+                return List.<Location>of();
+            }
+            return calls.stream()
+                .flatMap(call -> call.getFromRanges().stream()
+                    .map(range -> new Location(call.getFrom().getUri(), range)))
+                .toList();
+        }));
+    }
+
+    public List<? extends Location> findOutgoingCalls(String uri, int line, int character)
+        throws ExecutionException, InterruptedException, TimeoutException, IOException {
+        return withDiagnosticsSummary(() -> withRuntimeRecovery(() -> {
+            ensureAvailableForRequests();
+            RuntimeSession current = requireSession();
+            ensureDocumentOpen(current, uri);
+            CallHierarchyPrepareParams prepareParams = new CallHierarchyPrepareParams(
+                new TextDocumentIdentifier(uri),
+                new Position(line, character)
+            );
+            List<CallHierarchyItem> items = current.languageServer().getTextDocumentService()
+                .prepareCallHierarchy(prepareParams).get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            if (items == null || items.isEmpty()) {
+                return null;
+            }
+            CallHierarchyOutgoingCallsParams outgoingParams =
+                new CallHierarchyOutgoingCallsParams(items.get(0));
+            List<CallHierarchyOutgoingCall> calls = current.languageServer().getTextDocumentService()
+                .callHierarchyOutgoingCalls(outgoingParams).get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            if (calls == null) {
+                return List.<Location>of();
+            }
+            return calls.stream()
+                .map(call -> new Location(call.getTo().getUri(), call.getTo().getSelectionRange()))
+                .toList();
+        }));
+    }
+
     public List<? extends DocumentSymbol> getDocumentSymbols(String uri)
         throws ExecutionException, InterruptedException, TimeoutException, IOException {
         return withDiagnosticsSummary(() -> withRuntimeRecovery(() -> {
@@ -545,6 +644,30 @@ public class JdtlsClient implements AutoCloseable {
                 return result.stream().map(Either::getRight).toList();
             }
             return result.stream().map(either -> toDocumentSymbol(either.getLeft())).toList();
+        }));
+    }
+
+    public void buildWorkspace()
+        throws ExecutionException, InterruptedException, TimeoutException, IOException {
+        withDiagnosticsSummary(() -> withRuntimeRecovery(() -> {
+            ensureAvailableForRequests();
+            ExecuteCommandParams params = new ExecuteCommandParams("java.buildWorkspace", List.of());
+            session.languageServer().getWorkspaceService()
+                .executeCommand(params).get(RuntimeConstants.BUILD_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            return null;
+        }));
+    }
+
+    public Object resolveStackTraceLocation(String stackFrame)
+        throws ExecutionException, InterruptedException, TimeoutException, IOException {
+        return withDiagnosticsSummary(() -> withRuntimeRecovery(() -> {
+            ensureAvailableForRequests();
+            ExecuteCommandParams params = new ExecuteCommandParams(
+                "java.project.resolveStackTraceLocation",
+                List.of(stackFrame)
+            );
+            return session.languageServer().getWorkspaceService()
+                .executeCommand(params).get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
         }));
     }
 
@@ -674,6 +797,7 @@ public class JdtlsClient implements AutoCloseable {
 
     private String restartInternal(boolean cleanDataDir, String reason, boolean manual) throws Exception {
         try {
+            diagnosticsCache.clear();
             closeCurrentSession();
             abortIfClosed();
             if (cleanDataDir) {
@@ -814,6 +938,10 @@ public class JdtlsClient implements AutoCloseable {
         return languageClient;
     }
 
+    public DiagnosticsCache getDiagnosticsCache() {
+        return diagnosticsCache;
+    }
+
     public String getIndexingStatus() {
         return "status=" + state.name().toLowerCase()
             + "; message=" + stateMessage
@@ -826,7 +954,7 @@ public class JdtlsClient implements AutoCloseable {
     }
 
     static JdtlsClient createAndInitialize(Path workspaceRoot, String jdtlsCommand, RuntimeSessionFactory factory) throws Exception {
-        JdtlsClient client = new JdtlsClient(workspaceRoot, jdtlsCommand, factory);
+        JdtlsClient client = new JdtlsClient(workspaceRoot, jdtlsCommand, factory, new DiagnosticsCache());
         try {
             client.initialize();
             return client;
@@ -836,7 +964,7 @@ public class JdtlsClient implements AutoCloseable {
             deleteDirectory(client.dataDir);
             Files.createDirectories(client.dataDir);
         }
-        JdtlsClient retry = new JdtlsClient(workspaceRoot, jdtlsCommand, factory);
+        JdtlsClient retry = new JdtlsClient(workspaceRoot, jdtlsCommand, factory, new DiagnosticsCache());
         retry.initialize();
         return retry;
     }

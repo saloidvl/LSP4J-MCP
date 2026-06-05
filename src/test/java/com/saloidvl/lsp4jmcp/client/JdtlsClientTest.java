@@ -5,6 +5,10 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.eclipse.lsp4j.InitializeResult;
+import org.eclipse.lsp4j.CallHierarchyItem;
+import org.eclipse.lsp4j.Location;
+import org.eclipse.lsp4j.Position;
+import org.eclipse.lsp4j.Range;
 import org.eclipse.lsp4j.ServerCapabilities;
 import org.eclipse.lsp4j.services.LanguageServer;
 import org.eclipse.lsp4j.services.TextDocumentService;
@@ -15,6 +19,7 @@ import java.io.*;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.FileTime;
+import java.util.List;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
@@ -26,7 +31,9 @@ import java.util.concurrent.atomic.AtomicInteger;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 /**
  * Unit tests for JdtlsClient.
@@ -545,12 +552,41 @@ class JdtlsClientTest {
         client.close();
     }
 
+    @Test
+    void findIncomingCalls_prepareReturnsEmpty_returnsNull() throws Exception {
+        FakeRuntimeSessionFactory factory = new FakeRuntimeSessionFactory();
+        JdtlsClient client = JdtlsClient.createAndInitialize(tempDir, "/fake/jdtls", factory);
+        factory.currentLanguageServer.setPrepareCallHierarchyResult(List.of());
+        Path javaFile = tempDir.resolve("Foo.java");
+        Files.writeString(javaFile, "class Foo {}\n");
+
+        List<? extends Location> result = client.findIncomingCalls(javaFile.toUri().toString(), 0, 0);
+
+        assertThat(result).isNull();
+        client.close();
+    }
+
+    @Test
+    void findOutgoingCalls_prepareReturnsEmpty_returnsNull() throws Exception {
+        FakeRuntimeSessionFactory factory = new FakeRuntimeSessionFactory();
+        JdtlsClient client = JdtlsClient.createAndInitialize(tempDir, "/fake/jdtls", factory);
+        factory.currentLanguageServer.setPrepareCallHierarchyResult(List.of());
+        Path javaFile = tempDir.resolve("Foo.java");
+        Files.writeString(javaFile, "class Foo {}\n");
+
+        List<? extends Location> result = client.findOutgoingCalls(javaFile.toUri().toString(), 0, 0);
+
+        assertThat(result).isNull();
+        client.close();
+    }
+
     private static final class FakeRuntimeSessionFactory implements JdtlsClient.RuntimeSessionFactory {
         private final AtomicInteger startCount = new AtomicInteger();
         private boolean failFirstInitializeAttempt;
         private volatile CountDownLatch initializeBlocker = new CountDownLatch(0);
         private volatile CountDownLatch initializeAttemptLatch = new CountDownLatch(0);
         private volatile FakeProcess currentProcess;
+        private volatile FakeLanguageServer currentLanguageServer;
 
         @Override
         public JdtlsClient.RuntimeSession start(Path workspaceRoot, Path dataDir, String jdtlsCommand,
@@ -559,16 +595,18 @@ class JdtlsClientTest {
             Files.createDirectories(dataDir);
             FakeProcess process = new FakeProcess();
             currentProcess = process;
+            FakeLanguageServer server = new FakeLanguageServer(
+                failFirstInitializeAttempt && startCount.get() == 1,
+                process,
+                initializeBlocker,
+                initializeAttemptLatch);
+            currentLanguageServer = server;
             return new JdtlsClient.RuntimeSession(
                 generation,
                 process,
-                new FakeLanguageServer(
-                    failFirstInitializeAttempt && startCount.get() == 1,
-                    process,
-                    initializeBlocker,
-                    initializeAttemptLatch),
+                server,
                 new Thread(() -> {}, "fake-stderr"),
-                Set.of()
+                java.util.concurrent.ConcurrentHashMap.newKeySet()
             );
         }
 
@@ -628,6 +666,7 @@ class JdtlsClientTest {
         private final FakeProcess process;
         private final CountDownLatch initializeBlocker;
         private final CountDownLatch initializeAttemptLatch;
+        private final TextDocumentService textDocumentService = mock(TextDocumentService.class);
 
         private FakeLanguageServer(boolean failInitialize, FakeProcess process, CountDownLatch initializeBlocker,
                                    CountDownLatch initializeAttemptLatch) {
@@ -653,6 +692,11 @@ class JdtlsClientTest {
             return CompletableFuture.completedFuture(result);
         }
 
+        void setPrepareCallHierarchyResult(List<CallHierarchyItem> items) {
+            when(textDocumentService.prepareCallHierarchy(any()))
+                .thenReturn(CompletableFuture.completedFuture(items));
+        }
+
         @Override
         public CompletableFuture<Object> shutdown() {
             return CompletableFuture.completedFuture(null);
@@ -665,7 +709,7 @@ class JdtlsClientTest {
 
         @Override
         public TextDocumentService getTextDocumentService() {
-            return mock(TextDocumentService.class);
+            return textDocumentService;
         }
 
         @Override

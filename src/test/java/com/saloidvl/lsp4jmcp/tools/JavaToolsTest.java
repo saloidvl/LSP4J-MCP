@@ -1,5 +1,6 @@
 package com.saloidvl.lsp4jmcp.tools;
 
+import com.saloidvl.lsp4jmcp.client.DiagnosticsCache;
 import com.saloidvl.lsp4jmcp.client.JdtlsClient;
 import com.google.gson.Gson;
 import com.google.gson.JsonArray;
@@ -542,6 +543,256 @@ class JavaToolsTest {
         // Then - should not include the field
         JsonObject json = gson.fromJson(result, JsonObject.class);
         assertThat(json.get("count").getAsInt()).isEqualTo(0);
+    }
+
+    // ============================================
+    // findImplementations tests
+    // ============================================
+
+    @Test
+    void findImplementations_foundWithResults_returnsTrueAndLocations() throws Exception {
+        Location loc = new Location("file:///src/FooImpl.java",
+            new Range(new Position(9, 4), new Position(9, 20)));
+        doReturn(List.of(loc))
+            .when(jdtlsClient).findImplementations(anyString(), eq(4), eq(7));
+
+        String json = javaTools.findImplementations("/workspace/src/Foo.java", 5, 8);
+        JsonObject obj = gson.fromJson(json, JsonObject.class);
+
+        assertThat(obj.get("found").getAsBoolean()).isTrue();
+        assertThat(obj.get("count").getAsInt()).isEqualTo(1);
+        assertThat(obj.getAsJsonArray("implementations").size()).isEqualTo(1);
+        JsonObject impl = obj.getAsJsonArray("implementations").get(0).getAsJsonObject();
+        assertThat(impl.get("file").getAsString()).endsWith("FooImpl.java");
+        assertThat(impl.get("startLine").getAsInt()).isEqualTo(10);
+    }
+
+    @Test
+    void findImplementations_nullResult_returnsFalse() throws Exception {
+        when(jdtlsClient.findImplementations(anyString(), anyInt(), anyInt()))
+            .thenReturn(null);
+
+        String json = javaTools.findImplementations("/workspace/src/Foo.java", 5, 8);
+        JsonObject obj = gson.fromJson(json, JsonObject.class);
+
+        assertThat(obj.get("found").getAsBoolean()).isFalse();
+        assertThat(obj.get("count").getAsInt()).isEqualTo(0);
+        assertThat(obj.getAsJsonArray("implementations").size()).isZero();
+    }
+
+    @Test
+    void findImplementations_emptyList_returnsTrueWithZeroCount() throws Exception {
+        doReturn(List.of())
+            .when(jdtlsClient).findImplementations(anyString(), anyInt(), anyInt());
+
+        String json = javaTools.findImplementations("/workspace/src/Foo.java", 5, 8);
+        JsonObject obj = gson.fromJson(json, JsonObject.class);
+
+        assertThat(obj.get("found").getAsBoolean()).isTrue();
+        assertThat(obj.get("count").getAsInt()).isZero();
+    }
+
+    // ============================================
+    // getHover tests
+    // ============================================
+
+    @Test
+    void getHover_found_returnsContentAndRange() throws Exception {
+        Hover hover = new Hover();
+        hover.setContents(org.eclipse.lsp4j.jsonrpc.messages.Either.forRight(
+            new MarkupContent("markdown", "**String** java.lang.String")));
+        hover.setRange(new Range(new Position(4, 4), new Position(4, 10)));
+        when(jdtlsClient.getHover(anyString(), eq(4), eq(7))).thenReturn(hover);
+
+        String json = javaTools.getHover("/workspace/src/Foo.java", 5, 8);
+        JsonObject obj = gson.fromJson(json, JsonObject.class);
+
+        assertThat(obj.get("found").getAsBoolean()).isTrue();
+        assertThat(obj.get("content").getAsString()).contains("String");
+        assertThat(obj.getAsJsonObject("range").get("startLine").getAsInt()).isEqualTo(5);
+    }
+
+    @Test
+    void getHover_null_returnsFalse() throws Exception {
+        when(jdtlsClient.getHover(anyString(), anyInt(), anyInt())).thenReturn(null);
+
+        String json = javaTools.getHover("/workspace/src/Foo.java", 5, 8);
+        JsonObject obj = gson.fromJson(json, JsonObject.class);
+
+        assertThat(obj.get("found").getAsBoolean()).isFalse();
+        assertThat(obj.get("content").isJsonNull()).isTrue();
+    }
+
+    // ============================================
+    // call hierarchy tests
+    // ============================================
+
+    @Test
+    void findIncomingCalls_found_returnsCallSites() throws Exception {
+        Location callSite = new Location("file:///Caller.java",
+            new Range(new Position(9, 8), new Position(9, 18)));
+        doReturn(List.of(callSite))
+            .when(jdtlsClient).findIncomingCalls(anyString(), eq(4), eq(7));
+
+        String json = javaTools.findIncomingCalls("/workspace/src/Foo.java", 5, 8);
+        JsonObject obj = gson.fromJson(json, JsonObject.class);
+
+        assertThat(obj.get("found").getAsBoolean()).isTrue();
+        assertThat(obj.get("count").getAsInt()).isEqualTo(1);
+        assertThat(obj.getAsJsonArray("calls").get(0).getAsJsonObject()
+            .get("file").getAsString()).endsWith("Caller.java");
+    }
+
+    @Test
+    void findIncomingCalls_noHierarchyAtPosition_returnsFalse() throws Exception {
+        when(jdtlsClient.findIncomingCalls(anyString(), anyInt(), anyInt()))
+            .thenReturn(null);
+
+        String json = javaTools.findIncomingCalls("/workspace/src/Foo.java", 5, 8);
+        JsonObject obj = gson.fromJson(json, JsonObject.class);
+
+        assertThat(obj.get("found").getAsBoolean()).isFalse();
+        assertThat(obj.get("count").getAsInt()).isZero();
+    }
+
+    @Test
+    void findOutgoingCalls_found_returnsCalledMethods() throws Exception {
+        Location callee = new Location("file:///Bar.java",
+            new Range(new Position(3, 4), new Position(3, 11)));
+        doReturn(List.of(callee))
+            .when(jdtlsClient).findOutgoingCalls(anyString(), eq(4), eq(7));
+
+        String json = javaTools.findOutgoingCalls("/workspace/src/Foo.java", 5, 8);
+        JsonObject obj = gson.fromJson(json, JsonObject.class);
+
+        assertThat(obj.get("found").getAsBoolean()).isTrue();
+        assertThat(obj.get("count").getAsInt()).isEqualTo(1);
+        assertThat(obj.getAsJsonArray("calls").get(0).getAsJsonObject()
+            .get("file").getAsString()).endsWith("Bar.java");
+    }
+
+    @Test
+    void findOutgoingCalls_noHierarchyAtPosition_returnsFalse() throws Exception {
+        when(jdtlsClient.findOutgoingCalls(anyString(), anyInt(), anyInt()))
+            .thenReturn(null);
+
+        String json = javaTools.findOutgoingCalls("/workspace/src/Foo.java", 5, 8);
+        JsonObject obj = gson.fromJson(json, JsonObject.class);
+
+        assertThat(obj.get("found").getAsBoolean()).isFalse();
+        assertThat(obj.get("count").getAsInt()).isZero();
+    }
+
+    // ============================================
+    // diagnostics tests
+    // ============================================
+
+    @Test
+    void getDiagnostics_specificFile_returnsDiagnosticsForThatFile() {
+        DiagnosticsCache cache = new DiagnosticsCache();
+        Diagnostic d = new Diagnostic();
+        d.setSeverity(DiagnosticSeverity.Error);
+        d.setRange(new Range(new Position(4, 0), new Position(4, 10)));
+        d.setMessage("cannot find symbol");
+        cache.update("file:///workspace/src/Foo.java", List.of(d));
+        when(jdtlsClient.getDiagnosticsCache()).thenReturn(cache);
+
+        String json = javaTools.getDiagnostics(null, "/workspace/src/Foo.java");
+        JsonObject obj = gson.fromJson(json, JsonObject.class);
+
+        assertThat(obj.get("cached").getAsBoolean()).isTrue();
+        assertThat(obj.get("file").getAsString()).endsWith("Foo.java");
+        assertThat(obj.getAsJsonArray("diagnostics").size()).isEqualTo(1);
+        assertThat(obj.get("cache_updated_at_ms").getAsLong()).isPositive();
+    }
+
+    @Test
+    void getDiagnostics_summaryOnly_returnsSummaryPerFile() {
+        DiagnosticsCache cache = new DiagnosticsCache();
+        Diagnostic err = new Diagnostic();
+        err.setSeverity(DiagnosticSeverity.Error);
+        err.setRange(new Range(new Position(0, 0), new Position(0, 1)));
+        err.setMessage("error");
+        cache.update("file:///workspace/src/Foo.java", List.of(err));
+        when(jdtlsClient.getDiagnosticsCache()).thenReturn(cache);
+
+        String json = javaTools.getDiagnostics(true, null);
+        JsonObject obj = gson.fromJson(json, JsonObject.class);
+
+        assertThat(obj.get("cached").getAsBoolean()).isTrue();
+        JsonArray files = obj.getAsJsonArray("files");
+        assertThat(files.size()).isEqualTo(1);
+        JsonObject file = files.get(0).getAsJsonObject();
+        assertThat(file.get("errors").getAsInt()).isEqualTo(1);
+        assertThat(file.get("warnings").getAsInt()).isZero();
+    }
+
+    @Test
+    void getDiagnostics_emptyCache_returnsEmptyFiles() {
+        DiagnosticsCache cache = new DiagnosticsCache();
+        when(jdtlsClient.getDiagnosticsCache()).thenReturn(cache);
+
+        String json = javaTools.getDiagnostics(null, null);
+        JsonObject obj = gson.fromJson(json, JsonObject.class);
+
+        assertThat(obj.getAsJsonArray("files").size()).isZero();
+        assertThat(obj.get("cache_updated_at_ms").getAsLong()).isZero();
+    }
+
+    @Test
+    void getDiagnostics_fileNotInCache_returnsEmptyDiagnostics() {
+        DiagnosticsCache cache = new DiagnosticsCache();
+        when(jdtlsClient.getDiagnosticsCache()).thenReturn(cache);
+
+        String json = javaTools.getDiagnostics(null, "/workspace/src/Missing.java");
+        JsonObject obj = gson.fromJson(json, JsonObject.class);
+
+        assertThat(obj.get("file").getAsString()).endsWith("Missing.java");
+        assertThat(obj.getAsJsonArray("diagnostics").size()).isZero();
+        assertThat(obj.get("cached").getAsBoolean()).isTrue();
+    }
+
+    @Test
+    void refreshDiagnostics_returnsOkWithDuration() throws Exception {
+        doNothing().when(jdtlsClient).buildWorkspace();
+
+        String json = javaTools.refreshDiagnostics();
+        JsonObject obj = gson.fromJson(json, JsonObject.class);
+
+        assertThat(obj.get("status").getAsString()).isEqualTo("ok");
+        assertThat(obj.get("build_duration_ms").getAsLong()).isGreaterThanOrEqualTo(0);
+    }
+
+    @Test
+    void resolveStackTrace_found_returnsFileAndLine() throws Exception {
+        JsonObject location = new JsonObject();
+        location.addProperty("uri", "file:///workspace/src/com/example/Foo.java");
+        JsonObject start = new JsonObject();
+        start.addProperty("line", 41);
+        start.addProperty("character", 0);
+        JsonObject range = new JsonObject();
+        range.add("start", start);
+        range.add("end", start);
+        location.add("range", range);
+        when(jdtlsClient.resolveStackTraceLocation(anyString())).thenReturn(location);
+
+        String json = javaTools.resolveStackTrace("at com.example.Foo.bar(Foo.java:42)");
+        JsonObject obj = gson.fromJson(json, JsonObject.class);
+
+        assertThat(obj.get("file").getAsString()).endsWith("Foo.java");
+        assertThat(obj.get("line").getAsInt()).isEqualTo(42);
+    }
+
+    @Test
+    void resolveStackTrace_notFound_returnsNullFields() throws Exception {
+        when(jdtlsClient.resolveStackTraceLocation(anyString())).thenReturn(null);
+
+        String json = javaTools.resolveStackTrace("at com.example.Missing.method(Missing.java:1)");
+        JsonObject obj = gson.fromJson(json, JsonObject.class);
+
+        assertThat(obj.get("file").isJsonNull()).isTrue();
+        assertThat(obj.get("line").isJsonNull()).isTrue();
+        assertThat(obj.get("message").getAsString()).isEqualTo("not found");
     }
 
     // ============================================

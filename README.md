@@ -1,8 +1,23 @@
 # LSP4J-MCP Server
 
+[![CI](https://github.com/saloidvl/lsp4j-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/saloidvl/lsp4j-mcp/actions/workflows/ci.yml)
+
 LSP4J-MCP is a Java MCP server for Java codebases. It wraps Eclipse JDT Language Server through LSP4J and exposes Java navigation and symbol-search tools to MCP clients.
 
 The packaged entrypoint is now a local `launcher`, not the heavy analysis backend itself. The launcher keeps the MCP client contract on `stdio`, talks to a shared local `supervisor`, and reuses one `repo worker` plus one `JDTLS` process per repository.
+
+## Based On
+
+This is a fork of [devoxx/lsp4j-mcp](https://github.com/devoxx/lsp4j-mcp) with a major architectural overhaul.
+
+Key changes from the original:
+
+- New multi-process runtime: `LauncherMain` → `SupervisorMain` → `RepoWorkerMain`
+- Shared JDTLS instance per repository — multiple agents reuse one backend, no duplicate indexing
+- Unix domain socket + TCP IPC replacing the original direct subprocess model
+- Added `find_interfaces_with_method` tool
+- Automatic JDTLS crash recovery with back-to-back recovery protection
+- Full test suite added
 
 ## What It Is
 
@@ -10,14 +25,14 @@ Use this server when you want an MCP-compatible client to inspect a Java reposit
 
 ## Tools
 
-| Tool | Description |
-|------|-------------|
-| `find_symbols` | Search for Java symbols by name |
-| `find_references` | Find references at a file location |
-| `find_definition` | Go to definition at a file location |
-| `document_symbols` | List symbols declared in one Java file |
-| `indexing_status` | Report whether JDTLS indexing is still in progress |
-| `find_interfaces_with_method` | Find interfaces containing a method name |
+| Tool | Input | Output |
+|------|-------|--------|
+| `find_symbols` | Symbol name (string, supports wildcards) | List of matching symbols with file locations |
+| `find_references` | File path, line, character | All usages of the symbol at that position |
+| `find_definition` | File path, line, character | Definition location(s) of the symbol at that position |
+| `document_symbols` | File path | All symbols declared in that Java file |
+| `indexing_status` | — | Whether JDTLS indexing is still in progress |
+| `find_interfaces_with_method` | Method name | Interfaces that declare a method with that name |
 
 ## Runtime Model
 
@@ -43,7 +58,7 @@ The current IPC design is optimized for macOS and Linux:
 ## Requirements
 
 - Java 21+
-- Maven 3.8+
+- Maven 3.8+ (only if building from source)
 - JDTLS available on the machine where the worker runs
 - macOS or Linux recommended for the shared-runtime path
 
@@ -57,80 +72,51 @@ brew install jdtls
 
 If you do not use Homebrew, install Eclipse JDT Language Server from the official project and make sure the executable is available in `PATH`, or pass the full command as the last argument when starting the launcher.
 
-## Build
+## Install
 
-Normal development build:
+Download the latest JAR from the [Releases page](https://github.com/saloidvl/lsp4j-mcp/releases):
+
+```bash
+# Example — replace version as needed
+curl -L -o lsp4j-mcp.jar \
+  https://github.com/saloidvl/lsp4j-mcp/releases/latest/download/lsp4j-mcp-1.0.6.jar
+```
+
+## Build from Source
 
 ```bash
 mvn clean package
 ```
 
-This produces a shaded JAR in `target/`. Normal Maven builds do not publish artifacts into `dist/`.
-
-## Published Artifact
-
-The repository-managed binary lives in `dist/`, for example:
-
-```text
-dist/lsp4j-mcp-1.0.5-SNAPSHOT.jar
-```
-
-To publish a tracked binary into `dist/`, run:
+This produces a shaded JAR in `target/`. Run it directly from there:
 
 ```bash
-./scripts/bump-and-publish.sh <new-version>
+java -jar target/lsp4j-mcp-<version>.jar /path/to/java/workspace jdtls
 ```
 
-This flow:
-
-- updates `pom.xml` to the requested version
-- builds the shaded JAR
-- copies it from `target/` into `dist/`
-- fails if `dist/lsp4j-mcp-<new-version>.jar` already exists
-
-## Running The Launcher
-
-With the tracked repository artifact:
-
-```bash
-./run.sh /path/to/java/workspace
-```
-
-Direct invocation:
-
-```bash
-java -jar /path/to/lsp4j-mcp/dist/lsp4j-mcp-<version>.jar /path/to/java/workspace jdtls
-```
+## Running
 
 Arguments:
 
 1. Java workspace root to analyze
 2. JDTLS command to start, for example `jdtls`
 
+```bash
+java -jar lsp4j-mcp.jar /path/to/java/workspace jdtls
+```
+
 The launched process is `LauncherMain`. On the first connection for a repository it starts a shared local supervisor and a per-repository worker if needed. Later clients for the same repository reuse that worker and its single `JDTLS` process.
 
 ## Connecting From Any MCP Client
 
-The MCP client contract is still a local process over `stdio`:
-
-```text
-command: java
-args:
-  - -jar
-  - /path/to/lsp4j-mcp/dist/lsp4j-mcp-<version>.jar
-  - /path/to/java/workspace
-  - jdtls
-transport: stdio
-```
-
-Example JSON-style configuration:
+The MCP client contract is a local process over `stdio`:
 
 ```json
 {
   "command": "java",
   "args": [
     "-jar",
-    "/path/to/lsp4j-mcp/dist/lsp4j-mcp-1.0.5-SNAPSHOT.jar",
+    "/path/to/lsp4j-mcp.jar",
     "/path/to/java/workspace",
     "jdtls"
   ],
@@ -151,7 +137,7 @@ Add to `.mcp.json`:
       "command": "java",
       "args": [
         "-jar",
-        "/path/to/lsp4j-mcp/dist/lsp4j-mcp-1.0.5-SNAPSHOT.jar",
+        "/path/to/lsp4j-mcp.jar",
         "/path/to/java/workspace",
         "jdtls"
       ],
@@ -163,11 +149,18 @@ Add to `.mcp.json`:
 }
 ```
 
+## Releasing
+
+```bash
+./scripts/release.sh 1.1.0
+```
+
+This validates the working tree, bumps `pom.xml`, builds, commits, tags, and pushes. GitHub Actions then creates the GitHub Release with the JAR attached.
+
 ## Development Notes
 
 - Production code lives under `src/main/java/com/saloidvl/lsp4jmcp/`
 - `target/` is build output only
-- `dist/` is reserved for tracked published JARs
 - Run tests with `mvn test`
 - `JdtlsClientIntegrationTest` requires `JDTLS_PATH` to be set
 
@@ -179,4 +172,4 @@ Logs are written to `LOG_FILE` if provided, otherwise to `/tmp/lsp4j-mcp.log`.
 
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE).
