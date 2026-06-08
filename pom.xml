@@ -4,9 +4,9 @@
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
 
-    <groupId>com.devoxx</groupId>
+    <groupId>com.saloidvl</groupId>
     <artifactId>lsp4j-mcp</artifactId>
-    <version>1.0.0-SNAPSHOT</version>
+    <version>1.0.6</version>
     <packaging>jar</packaging>
 
     <name>LSP4J MCP Server</name>
@@ -16,8 +16,8 @@
         <maven.compiler.source>21</maven.compiler.source>
         <maven.compiler.target>21</maven.compiler.target>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-        <lsp4j.version>0.23.1</lsp4j.version>
-        <mcp-sdk.version>0.10.0</mcp-sdk.version>
+        <lsp4j.version>1.0.0</lsp4j.version>
+        <mcp-sdk.version>1.1.1</mcp-sdk.version>
         <slf4j.version>2.0.16</slf4j.version>
         <logback.version>1.5.12</logback.version>
     </properties>
@@ -89,6 +89,22 @@
     </dependencies>
 
     <build>
+        <resources>
+            <resource>
+                <directory>src/main/resources</directory>
+                <filtering>false</filtering>
+                <excludes>
+                    <exclude>build-info.properties</exclude>
+                </excludes>
+            </resource>
+            <resource>
+                <directory>src/main/resources</directory>
+                <filtering>true</filtering>
+                <includes>
+                    <include>build-info.properties</include>
+                </includes>
+            </resource>
+        </resources>
         <plugins>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
@@ -112,7 +128,7 @@
                         <configuration>
                             <transformers>
                                 <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
-                                    <mainClass>com.devoxx.lsp4jmcp.server.McpServerMain</mainClass>
+                                    <mainClass>com.saloidvl.lsp4jmcp.launcher.LauncherMain</mainClass>
                                 </transformer>
                             </transformers>
                             <filters>
