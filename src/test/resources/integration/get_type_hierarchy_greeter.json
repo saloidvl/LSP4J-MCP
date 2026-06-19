@@ -1,0 +1,17 @@
+{
+  "name": "Greeter",
+  "uri": "file://$FIXTURE/src/main/java/com/example/sample/Greeter.java",
+  "supertypes": [],
+  "subtypes": [
+    {
+      "name": "GreeterImpl",
+      "uri": "file://$FIXTURE/src/main/java/com/example/sample/GreeterImpl.java",
+      "range": {
+        "startLine": 3,
+        "startCharacter": 1,
+        "endLine": 9,
+        "endCharacter": 2
+      }
+    }
+  ]
+}

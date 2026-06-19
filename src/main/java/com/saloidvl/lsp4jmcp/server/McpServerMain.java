@@ -1,12 +1,13 @@
 package com.saloidvl.lsp4jmcp.server;
 
 import com.saloidvl.lsp4jmcp.client.JdtlsClient;
+import com.saloidvl.lsp4jmcp.client.LombokSupport;
 import com.saloidvl.lsp4jmcp.runtime.BuildInfo;
 import io.modelcontextprotocol.server.McpSyncServer;
+import java.nio.file.Path;
+import java.util.Optional;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
-import java.nio.file.Path;
 
 /**
  * MCP Server that provides Java IDE features via JDTLS.
@@ -63,8 +64,8 @@ public class McpServerMain {
     }
 
     private static void run(Path workspacePath, String jdtlsCommand) throws Exception {
-        // Start JDTLS client
-        JdtlsClient jdtlsClient = JdtlsClient.createAndInitialize(workspacePath, jdtlsCommand);
+        Optional<Path> lombokJar = LombokSupport.detectAndFind(workspacePath);
+        JdtlsClient jdtlsClient = JdtlsClient.createAndInitialize(workspacePath, jdtlsCommand, lombokJar);
 
         McpSyncServer server = JavaMcpServer.create(System.in, System.out, jdtlsClient, workspacePath);
 

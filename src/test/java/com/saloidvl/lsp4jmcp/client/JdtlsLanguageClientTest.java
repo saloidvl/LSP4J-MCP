@@ -5,6 +5,7 @@ import org.eclipse.lsp4j.jsonrpc.messages.Either;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.nio.file.Path;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.ExecutionException;
@@ -63,13 +64,18 @@ class JdtlsLanguageClientTest {
     }
 
     @Test
-    void workspaceFolders_returnsEmptyList() throws ExecutionException, InterruptedException {
-        // When
+    void workspaceFolders_noRootSet_returnsEmptyList() throws ExecutionException, InterruptedException {
         var result = client.workspaceFolders().get();
-
-        // Then
-        assertThat(result).isNotNull();
         assertThat(result).isEmpty();
+    }
+
+    @Test
+    void workspaceFolders_withRoot_returnsSingleFolder() throws ExecutionException, InterruptedException {
+        client.setWorkspaceRoot(Path.of("/workspace/my-project"));
+        var result = client.workspaceFolders().get();
+        assertThat(result).hasSize(1);
+        assertThat(result.get(0).getName()).isEqualTo("my-project");
+        assertThat(result.get(0).getUri()).endsWith("my-project");
     }
 
     @Test

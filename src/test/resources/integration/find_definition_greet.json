@@ -1,0 +1,15 @@
+{
+  "file": "$FIXTURE/src/main/java/com/example/sample/App.java",
+  "line": 7,
+  "character": 34,
+  "position_resolved": true,
+  "definitions": [
+    {
+      "file": "$FIXTURE/src/main/java/com/example/sample/Greeter.java",
+      "startLine": 5,
+      "startColumn": 12,
+      "endLine": 5,
+      "endColumn": 17
+    }
+  ]
+}

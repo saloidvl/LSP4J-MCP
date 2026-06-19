@@ -1,18 +1,37 @@
 package com.saloidvl.lsp4jmcp.client;
 
-import org.eclipse.lsp4j.*;
-import org.eclipse.lsp4j.jsonrpc.services.JsonNotification;
-import org.eclipse.lsp4j.services.LanguageClient;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
-import java.util.Objects;
+import java.nio.file.Path;
 import java.util.List;
-import java.util.function.Consumer;
+import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Consumer;
+import org.eclipse.lsp4j.ApplyWorkspaceEditParams;
+import org.eclipse.lsp4j.ApplyWorkspaceEditResponse;
+import org.eclipse.lsp4j.ConfigurationParams;
+import org.eclipse.lsp4j.MessageActionItem;
+import org.eclipse.lsp4j.MessageParams;
+import org.eclipse.lsp4j.MessageType;
+import org.eclipse.lsp4j.ProgressParams;
+import org.eclipse.lsp4j.PublishDiagnosticsParams;
+import org.eclipse.lsp4j.Registration;
+import org.eclipse.lsp4j.RegistrationParams;
+import org.eclipse.lsp4j.ShowDocumentParams;
+import org.eclipse.lsp4j.ShowDocumentResult;
+import org.eclipse.lsp4j.ShowMessageRequestParams;
+import org.eclipse.lsp4j.UnregistrationParams;
+import org.eclipse.lsp4j.WorkDoneProgressBegin;
+import org.eclipse.lsp4j.WorkDoneProgressCreateParams;
+import org.eclipse.lsp4j.WorkDoneProgressEnd;
+import org.eclipse.lsp4j.WorkDoneProgressNotification;
+import org.eclipse.lsp4j.WorkDoneProgressReport;
+import org.eclipse.lsp4j.WorkspaceFolder;
+import org.eclipse.lsp4j.jsonrpc.services.JsonNotification;
+import org.eclipse.lsp4j.services.LanguageClient;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Language client implementation that receives callbacks from JDTLS.
@@ -28,6 +47,7 @@ public class JdtlsLanguageClient implements LanguageClient {
     private final AtomicInteger diagnosticsBatchCount = new AtomicInteger();
     private final AtomicInteger diagnosticsEntryCount = new AtomicInteger();
     private volatile DiagnosticsCache diagnosticsCache;
+    private volatile Path workspaceRoot;
     private volatile Consumer<String> recoverySignalHandler = reason -> {};
     private volatile Consumer<LanguageClientSnapshot> statusListener = snapshot -> {};
 
@@ -141,6 +161,10 @@ public class JdtlsLanguageClient implements LanguageClient {
         this.diagnosticsCache = cache;
     }
 
+    public void setWorkspaceRoot(Path root) {
+        this.workspaceRoot = root;
+    }
+
     private LanguageClientSnapshot snapshot() {
         return new LanguageClientSnapshot(ready, currentStatus, progressMessage, progressPct);
     }
@@ -173,6 +197,9 @@ public class JdtlsLanguageClient implements LanguageClient {
     public void publishDiagnostics(PublishDiagnosticsParams diagnostics) {
         diagnosticsBatchCount.incrementAndGet();
         diagnosticsEntryCount.addAndGet(diagnostics.getDiagnostics().size());
+        if (!diagnostics.getDiagnostics().isEmpty()) {
+            LOG.debug("JDTLS publishDiagnostics: {}", LspSummarizer.diagnostics(diagnostics, 3));
+        }
         if (diagnosticsCache != null) {
             diagnosticsCache.update(diagnostics.getUri(), diagnostics.getDiagnostics());
         }
@@ -180,9 +207,7 @@ public class JdtlsLanguageClient implements LanguageClient {
 
     @Override
     public void showMessage(MessageParams messageParams) {
-        LOG.info("JDTLS message [{}]: {}",
-            messageParams.getType(),
-            messageParams.getMessage());
+        logByType(messageParams.getType(), messageParams.getMessage());
     }
 
     @Override
@@ -193,15 +218,18 @@ public class JdtlsLanguageClient implements LanguageClient {
 
     @Override
     public void logMessage(MessageParams message) {
-        if (message.getType() == MessageType.Error || message.getType() == MessageType.Warning) {
+        MessageType type = message.getType();
+        if (type == MessageType.Error || type == MessageType.Warning) {
             recoverySignalHandler.accept(message.getMessage());
         }
-        switch (message.getType()) {
-            case Error -> LOG.error("JDTLS: {}", message.getMessage());
-            case Warning -> LOG.warn("JDTLS: {}", message.getMessage());
-            case Info -> LOG.info("JDTLS: {}", message.getMessage());
-            case Log -> LOG.debug("JDTLS: {}", message.getMessage());
-        }
+        logByType(type, message.getMessage());
+    }
+
+    private void logByType(MessageType type, String msg) {
+        if (type == MessageType.Error) LOG.error("JDTLS: {}", msg);
+        else if (type == MessageType.Warning) LOG.warn("JDTLS: {}", msg);
+        else if (type == MessageType.Info) LOG.info("JDTLS: {}", msg);
+        else LOG.debug("JDTLS: {}", msg);
     }
 
     /**
@@ -235,8 +263,11 @@ public class JdtlsLanguageClient implements LanguageClient {
     @Override
     public CompletableFuture<List<WorkspaceFolder>> workspaceFolders() {
         LOG.debug("Workspace folders requested");
-        // Return empty list - the folders are set during initialization
-        return CompletableFuture.completedFuture(List.of());
+        if (workspaceRoot == null) {
+            return CompletableFuture.completedFuture(List.of());
+        }
+        WorkspaceFolder folder = new WorkspaceFolder(workspaceRoot.toUri().toString(), workspaceRoot.getFileName().toString());
+        return CompletableFuture.completedFuture(List.of(folder));
     }
 
     /**
@@ -244,7 +275,10 @@ public class JdtlsLanguageClient implements LanguageClient {
      */
     @Override
     public CompletableFuture<List<Object>> configuration(ConfigurationParams params) {
-        LOG.debug("Configuration requested for {} items", params.getItems().size());
+        LOG.debug(
+            "Configuration requested for {} items: {}",
+            params.getItems().size(),
+            LspSummarizer.configurationItems(params.getItems()));
         // Return empty config for each item
         return CompletableFuture.completedFuture(
             params.getItems().stream()
@@ -334,7 +368,8 @@ public class JdtlsLanguageClient implements LanguageClient {
             progressMessage = begin.getMessage() != null ? begin.getMessage() : "";
             progressPct = begin.getPercentage() != null ? begin.getPercentage() : -1;
             lastLoggedPct.set(progressPct);
-            LOG.info("JDTLS [{}] started: {}{}", progressTitle,
+            LOG.debug(
+                "JDTLS [{}] started: {}{}", progressTitle,
                 progressMessage.isEmpty() ? "" : progressMessage + " ",
                 progressPct >= 0 ? progressPct + "%" : "");
         } else if (notification instanceof WorkDoneProgressReport report) {
@@ -342,7 +377,8 @@ public class JdtlsLanguageClient implements LanguageClient {
             int pct = report.getPercentage() != null ? report.getPercentage() : -1;
             progressPct = pct;
             if (pct < 0 || pct - lastLoggedPct.get() >= 10) {
-                LOG.info("JDTLS indexing: {}{}",
+                LOG.debug(
+                    "JDTLS indexing: {}{}",
                     progressMessage.isEmpty() ? "" : progressMessage + " ",
                     pct >= 0 ? pct + "%" : "");
                 lastLoggedPct.set(pct);
@@ -351,7 +387,7 @@ public class JdtlsLanguageClient implements LanguageClient {
             progressMessage = end.getMessage() != null ? end.getMessage() : "";
             progressPct = -1;
             lastLoggedPct.set(-1);
-            LOG.info("JDTLS task done: {}", progressMessage.isEmpty() ? "OK" : progressMessage);
+            LOG.debug("JDTLS task done: {}", progressMessage.isEmpty() ? "OK" : progressMessage);
         }
         statusListener.accept(snapshot());
     }

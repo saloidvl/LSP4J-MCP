@@ -4,7 +4,6 @@ public record SupervisorRequest(
     SupervisorCommand command,
     String repoId,
     String workspacePath,
-    String jdtlsCommand,
-    String leaseId
+    String jdtlsCommand
 ) {
 }

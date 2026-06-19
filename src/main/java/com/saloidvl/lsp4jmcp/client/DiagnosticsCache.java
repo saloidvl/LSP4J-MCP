@@ -19,7 +19,7 @@ public class DiagnosticsCache {
     private final ConcurrentHashMap<String, Entry> cache = new ConcurrentHashMap<>();
     private volatile long lastUpdatedMs = 0;
 
-    public void update(String uri, List<Diagnostic> diagnostics) {
+    public synchronized void update(String uri, List<Diagnostic> diagnostics) {
         if (diagnostics.isEmpty()) {
             cache.remove(uri);
         } else {
@@ -40,7 +40,7 @@ public class DiagnosticsCache {
         Map<String, Summary> result = new LinkedHashMap<>();
         cache.forEach((uri, entry) -> {
             int errors = (int) entry.diagnostics().stream()
-                .filter(d -> d.getSeverity() == DiagnosticSeverity.Error)
+                .filter(d -> d.getSeverity() == null || d.getSeverity() == DiagnosticSeverity.Error)
                 .count();
             int warnings = (int) entry.diagnostics().stream()
                 .filter(d -> d.getSeverity() == DiagnosticSeverity.Warning)
@@ -54,7 +54,7 @@ public class DiagnosticsCache {
         return lastUpdatedMs;
     }
 
-    public void clear() {
+    public synchronized void clear() {
         cache.clear();
         lastUpdatedMs = 0;
     }

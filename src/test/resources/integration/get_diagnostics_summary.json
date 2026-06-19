@@ -1,0 +1,11 @@
+{
+  "files": [
+    {
+      "file": "$FIXTURE/src/main/java/com/example/sample/GreeterImpl.java",
+      "errors": 0,
+      "warnings": 1
+    }
+  ],
+  "cached": true,
+  "cache_updated_at_ms": 1781092072392
+}

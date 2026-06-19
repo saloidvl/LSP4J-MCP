@@ -25,7 +25,7 @@ public final class JavaMcpServer {
         "find_definition",
         "document_symbols",
         "indexing_status",
-        "find_interfaces_with_method",
+        "find_method_declarations",
         "restart_jdtls",
         "reindex_workspace",
         "find_implementations",
@@ -34,7 +34,12 @@ public final class JavaMcpServer {
         "find_outgoing_calls",
         "get_diagnostics",
         "refresh_diagnostics",
-        "resolve_stack_trace"
+        "resolve_stack_trace",
+        "decompile_class",
+        "get_type_hierarchy",
+        "get_type_definition",
+        "get_projects",
+        "get_classpath"
     );
 
     private JavaMcpServer() {
@@ -58,7 +63,7 @@ public final class JavaMcpServer {
             .toolCall(
                 Tool.builder()
                     .name("find_symbols")
-                    .description("Search for Java symbols (classes, methods, fields) by name")
+                    .description("Search for Java symbols (classes, methods, fields) by name. Results may contain two entries for the same class — one at the annotation line (empty container) and one at the class keyword line (full package in container). Duplicates are filtered automatically: the entry with a non-empty container is kept.")
                     .inputSchema(objectMapper.readValue("""
                     {
                       "type": "object",
@@ -92,8 +97,8 @@ public final class JavaMcpServer {
                     .build(),
                 (exchange, request) -> {
                     String file = (String) request.arguments().get("file");
-                    int line = ((Number) request.arguments().get("line")).intValue() - 1;
-                    int character = ((Number) request.arguments().get("character")).intValue() - 1;
+                    int line = ((Number) request.arguments().get("line")).intValue();
+                    int character = ((Number) request.arguments().get("character")).intValue();
                     return CallToolResult.builder()
                         .addTextContent(javaTools.findReferences(file, line, character))
                         .build();
@@ -102,25 +107,29 @@ public final class JavaMcpServer {
             .toolCall(
                 Tool.builder()
                     .name("find_definition")
-                    .description("Go to the definition of a symbol at a given file location")
+                    .description("Go to the definition of a symbol at a given file location. Provide either character (1-based column) or symbol (the identifier name to locate on the line) — the server finds the column automatically when symbol is given. character must point to an identifier token, not whitespace, a keyword, or punctuation; the response includes position_resolved to distinguish an invalid position from a genuine \"no definition found.\"")
                     .inputSchema(objectMapper.readValue("""
                     {
                       "type": "object",
                       "properties": {
-                        "file": { "type": "string", "description": "Path to the Java file" },
-                        "line": { "type": "integer", "description": "Line number (1-based)" },
-                        "character": { "type": "integer", "description": "Character/column position (1-based)" }
+                        "file": { "type": "string", "description": "absolute file path" },
+                        "line": { "type": "integer", "description": "1-based line number" },
+                        "character": { "type": "integer", "description": "1-based character offset; optional if symbol is provided" },
+                        "symbol": { "type": "string", "description": "identifier name to locate on the line (e.g. class or method name); used to find character automatically" }
                       },
-                      "required": ["file", "line", "character"]
+                      "required": ["file", "line"]
                     }
                     """, McpSchema.JsonSchema.class))
                     .build(),
                 (exchange, request) -> {
                     String file = (String) request.arguments().get("file");
-                    int line = ((Number) request.arguments().get("line")).intValue() - 1;
-                    int character = ((Number) request.arguments().get("character")).intValue() - 1;
+                    int line = ((Number) request.arguments().get("line")).intValue();
+                    Integer character = request.arguments().get("character") != null
+                        ? ((Number) request.arguments().get("character")).intValue()
+                        : null;
+                    String symbol = (String) request.arguments().get("symbol");
                     return CallToolResult.builder()
-                        .addTextContent(javaTools.findDefinition(file, line, character))
+                        .addTextContent(javaTools.findDefinition(file, line, character, symbol))
                         .build();
                 })
 
@@ -158,22 +167,45 @@ public final class JavaMcpServer {
 
             .toolCall(
                 Tool.builder()
-                    .name("find_interfaces_with_method")
-                    .description("Find all interfaces that contain a method with the given name")
+                    .name("find_method_declarations")
+                    .description("Find all interfaces or classes that declare a method with the given name")
                     .inputSchema(objectMapper.readValue("""
                     {
                       "type": "object",
                       "properties": {
-                        "method_name": { "type": "string", "description": "The method name to search for" }
+                        "method_name": {
+                          "type": "string",
+                          "description": "Simple method name to search for (case-insensitive contains-match)"
+                        },
+                        "search_in": {
+                          "type": "string",
+                          "description": "Container kind filter: \\"interfaces\\" (default), \\"classes\\", or \\"all\\""
+                        },
+                        "package_filter": {
+                          "type": "string",
+                          "description": "Prefix-match on Java package name, e.g. \\"com.example.repo\\""
+                        },
+                        "parameter_count": {
+                          "type": "integer",
+                          "description": "Exact parameter count; absent means no filter"
+                        }
                       },
                       "required": ["method_name"]
                     }
                     """, McpSchema.JsonSchema.class))
                     .build(),
-                (exchange, request) ->
-                    CallToolResult.builder()
-                        .addTextContent(javaTools.findInterfacesWithMethod((String) request.arguments().get("method_name")))
-                        .build())
+                (exchange, request) -> {
+                    String methodName = (String) request.arguments().get("method_name");
+                    String searchIn = (String) request.arguments().get("search_in");
+                    String packageFilter = (String) request.arguments().get("package_filter");
+                    Integer parameterCount = request.arguments().get("parameter_count") != null
+                        ? ((Number) request.arguments().get("parameter_count")).intValue()
+                        : null;
+                    return CallToolResult.builder()
+                        .addTextContent(javaTools.findMethodDeclarations(
+                            methodName, searchIn, packageFilter, parameterCount))
+                        .build();
+                })
 
             .toolCall(
                 Tool.builder()
@@ -226,74 +258,96 @@ public final class JavaMcpServer {
             .toolCall(
                 Tool.builder()
                     .name("get_hover")
-                    .description("Get hover information, such as type signature and Javadoc, for the symbol at the given position.")
+                    .description(
+                        "Get hover information, such as type signature and Javadoc, for the symbol at the given position. Provide either character (1-based column) or symbol (identifier name to locate on the line).")
                     .inputSchema(objectMapper.readValue("""
                     {
                       "type": "object",
                       "properties": {
                         "file": { "type": "string", "description": "Absolute path to the Java file" },
                         "line": { "type": "integer", "description": "1-based line number" },
-                        "character": { "type": "integer", "description": "1-based character offset" }
+                            "character": { "type": "integer", "description": "1-based character offset; optional if symbol is provided" },
+                            "symbol": { "type": "string", "description": "identifier name to locate on the line; used to find character automatically" }
                       },
-                      "required": ["file", "line", "character"]
+                          "required": ["file", "line"]
                     }
                     """, McpSchema.JsonSchema.class))
                     .build(),
-                (exchange, request) ->
-                    CallToolResult.builder()
+                (exchange, request) -> {
+                    Integer character = request.arguments().get("character") != null
+                        ? ((Number) request.arguments().get("character")).intValue()
+                        : null;
+                    String symbol = (String) request.arguments().get("symbol");
+                    return CallToolResult.builder()
                         .addTextContent(javaTools.getHover(
                             (String) request.arguments().get("file"),
                             ((Number) request.arguments().get("line")).intValue(),
-                            ((Number) request.arguments().get("character")).intValue()))
-                        .build())
+                            character,
+                            symbol))
+                        .build();
+                })
 
             .toolCall(
                 Tool.builder()
                     .name("find_incoming_calls")
-                    .description("Find all call sites where the method at the given position is called from.")
+                    .description("Find all call sites where the method at the given position is called from. Provide either character (1-based column) or symbol (the method name to locate on the line). character must point to the method name token. When position is invalid (not on a callable element), found is false; when position is valid but no callers exist, found is true and count is 0.")
                     .inputSchema(objectMapper.readValue("""
                     {
                       "type": "object",
                       "properties": {
-                        "file": { "type": "string", "description": "Absolute path to the Java file" },
+                        "file": { "type": "string", "description": "absolute file path" },
                         "line": { "type": "integer", "description": "1-based line number" },
-                        "character": { "type": "integer", "description": "1-based character offset" }
+                        "character": { "type": "integer", "description": "1-based character offset; optional if symbol is provided" },
+                        "symbol": { "type": "string", "description": "identifier name to locate on the line (e.g. method name); used to find character automatically" }
                       },
-                      "required": ["file", "line", "character"]
+                      "required": ["file", "line"]
                     }
                     """, McpSchema.JsonSchema.class))
                     .build(),
-                (exchange, request) ->
-                    CallToolResult.builder()
+                (exchange, request) -> {
+                    Integer character = request.arguments().get("character") != null
+                        ? ((Number) request.arguments().get("character")).intValue()
+                        : null;
+                    String symbol = (String) request.arguments().get("symbol");
+                    return CallToolResult.builder()
                         .addTextContent(javaTools.findIncomingCalls(
                             (String) request.arguments().get("file"),
                             ((Number) request.arguments().get("line")).intValue(),
-                            ((Number) request.arguments().get("character")).intValue()))
-                        .build())
+                            character,
+                            symbol))
+                        .build();
+                })
 
             .toolCall(
                 Tool.builder()
                     .name("find_outgoing_calls")
-                    .description("Find all methods called by the method at the given position.")
+                    .description("Find all methods called by the method at the given position. Provide either character (1-based column) or symbol (the method name to locate on the line). character must point to the method name token. When position is invalid, found is false; when valid but no calls are found, found is true and count is 0. Limitation: only calls to project-local types are returned; calls to external library types and JDK stdlib are excluded by Eclipse JDT's call hierarchy implementation. On generic methods, duplicate entries may appear for the same call site.")
                     .inputSchema(objectMapper.readValue("""
                     {
                       "type": "object",
                       "properties": {
-                        "file": { "type": "string", "description": "Absolute path to the Java file" },
+                        "file": { "type": "string", "description": "absolute file path" },
                         "line": { "type": "integer", "description": "1-based line number" },
-                        "character": { "type": "integer", "description": "1-based character offset" }
+                        "character": { "type": "integer", "description": "1-based character offset; optional if symbol is provided" },
+                        "symbol": { "type": "string", "description": "identifier name to locate on the line (e.g. method name); used to find character automatically" }
                       },
-                      "required": ["file", "line", "character"]
+                      "required": ["file", "line"]
                     }
                     """, McpSchema.JsonSchema.class))
                     .build(),
-                (exchange, request) ->
-                    CallToolResult.builder()
+                (exchange, request) -> {
+                    Integer character = request.arguments().get("character") != null
+                        ? ((Number) request.arguments().get("character")).intValue()
+                        : null;
+                    String symbol = (String) request.arguments().get("symbol");
+                    return CallToolResult.builder()
                         .addTextContent(javaTools.findOutgoingCalls(
                             (String) request.arguments().get("file"),
                             ((Number) request.arguments().get("line")).intValue(),
-                            ((Number) request.arguments().get("character")).intValue()))
-                        .build())
+                            character,
+                            symbol))
+                        .build();
+                })
 
             .toolCall(
                 Tool.builder()
@@ -351,6 +405,124 @@ public final class JavaMcpServer {
                     CallToolResult.builder()
                         .addTextContent(javaTools.resolveStackTrace(
                             (String) request.arguments().get("stack_frame")))
+                        .build())
+
+            .toolCall(
+                Tool.builder()
+                    .name("decompile_class")
+                    .description(
+                        "Decompile a dependency class file to Java source. Use find_definition on a third-party class to obtain the class URI (typically a jdt:// or jar: URI), then pass it here to read the source.")
+                    .inputSchema(objectMapper.readValue(
+                        """
+                            {
+                              "type": "object",
+                              "properties": {
+                                "uri": { "type": "string", "description": "Class file URI (jdt:// or jar: URI from find_definition)" }
+                              },
+                              "required": ["uri"]
+                            }
+                            """, McpSchema.JsonSchema.class))
+                    .build(),
+                (exchange, request) ->
+                    CallToolResult.builder()
+                        .addTextContent(javaTools.decompileClass((String) request.arguments().get("uri")))
+                        .build())
+
+            .toolCall(
+                Tool.builder()
+                    .name("get_type_hierarchy")
+                    .description(
+                        "Get the full type hierarchy (supertypes and subtypes) for the type at the given position. Provide either character (1-based column) or symbol (type name to locate on the line).")
+                    .inputSchema(objectMapper.readValue(
+                        """
+                            {
+                              "type": "object",
+                              "properties": {
+                                "file":      { "type": "string",  "description": "Absolute path to the Java file" },
+                                "line":      { "type": "integer", "description": "1-based line number" },
+                                "character": { "type": "integer", "description": "1-based character offset; optional if symbol is provided" },
+                                "symbol":    { "type": "string",  "description": "Type name to locate on the line (e.g. class or interface name)" }
+                              },
+                              "required": ["file", "line"]
+                            }
+                            """, McpSchema.JsonSchema.class))
+                    .build(),
+                (exchange, request) -> {
+                    Integer character = request.arguments().get("character") != null
+                        ? ((Number) request.arguments().get("character")).intValue() : null;
+                    String symbol = (String) request.arguments().get("symbol");
+                    return CallToolResult.builder()
+                        .addTextContent(javaTools.getTypeHierarchy(
+                            (String) request.arguments().get("file"),
+                            ((Number) request.arguments().get("line")).intValue(),
+                            character, symbol))
+                        .build();
+                })
+
+            .toolCall(
+                Tool.builder()
+                    .name("get_type_definition")
+                    .description(
+                        "Resolve the declared type of the symbol at the given position. Useful when a variable is declared as an interface. Provide either character (1-based column) or symbol (identifier name to locate on the line).")
+                    .inputSchema(objectMapper.readValue(
+                        """
+                            {
+                              "type": "object",
+                              "properties": {
+                                "file":      { "type": "string",  "description": "Absolute path to the Java file" },
+                                "line":      { "type": "integer", "description": "1-based line number" },
+                                "character": { "type": "integer", "description": "1-based character offset; optional if symbol is provided" },
+                                "symbol":    { "type": "string",  "description": "Identifier name to locate on the line" }
+                              },
+                              "required": ["file", "line"]
+                            }
+                            """, McpSchema.JsonSchema.class))
+                    .build(),
+                (exchange, request) -> {
+                    Integer character = request.arguments().get("character") != null
+                        ? ((Number) request.arguments().get("character")).intValue() : null;
+                    String symbol = (String) request.arguments().get("symbol");
+                    return CallToolResult.builder()
+                        .addTextContent(javaTools.getTypeDefinition(
+                            (String) request.arguments().get("file"),
+                            ((Number) request.arguments().get("line")).intValue(),
+                            character, symbol))
+                        .build();
+                })
+
+            .toolCall(
+                Tool.builder()
+                    .name("get_projects")
+                    .description("List all Java projects in the workspace with their names and URIs.")
+                    .inputSchema(objectMapper.readValue(
+                        """
+                            {"type": "object", "properties": {}}
+                            """, McpSchema.JsonSchema.class))
+                    .build(),
+                (exchange, request) ->
+                    CallToolResult.builder()
+                        .addTextContent(javaTools.getProjects())
+                        .build())
+
+            .toolCall(
+                Tool.builder()
+                    .name("get_classpath")
+                    .description(
+                        "Get the classpath for the project containing the given file. Returns source directories and JAR dependencies separately.")
+                    .inputSchema(objectMapper.readValue(
+                        """
+                            {
+                              "type": "object",
+                              "properties": {
+                                "file": { "type": "string", "description": "Absolute path to any Java file in the target project" }
+                              },
+                              "required": ["file"]
+                            }
+                            """, McpSchema.JsonSchema.class))
+                    .build(),
+                (exchange, request) ->
+                    CallToolResult.builder()
+                        .addTextContent(javaTools.getClasspath((String) request.arguments().get("file")))
                         .build())
 
             .build();

@@ -1,6 +1,5 @@
 package com.saloidvl.lsp4jmcp.launcher;
 
-import com.saloidvl.lsp4jmcp.control.SupervisorResponse;
 import com.saloidvl.lsp4jmcp.supervisor.SupervisorClient;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -20,9 +19,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 class LauncherMainIntegrationTest {
 
     @Test
-    void run_acquiresWorkerProxiesBytesAndReleasesLease(@TempDir Path tempDir) throws Exception {
+    void run_openLeaseProxiesBytesAndReleasesLeaseOnClose(@TempDir Path tempDir) throws Exception {
         Path workspace = Files.createDirectories(tempDir.resolve("workspace"));
-        AtomicBoolean released = new AtomicBoolean(false);
+        AtomicBoolean leaseClosed = new AtomicBoolean(false);
         CountDownLatch workerHandled = new CountDownLatch(1);
 
         try (ServerSocket workerSocket = new ServerSocket(0)) {
@@ -37,28 +36,14 @@ class LauncherMainIntegrationTest {
             });
             workerThread.start();
 
-            SupervisorClient supervisorClient = new SupervisorClient() {
-                @Override
-                public SupervisorResponse acquire(Path workspacePath, String jdtlsCommand) {
-                    return new SupervisorResponse(
-                        true,
-                        "ok",
-                        "lease-1",
-                        "127.0.0.1",
-                        workerSocket.getLocalPort(),
-                        101L
-                    );
-                }
-
-                @Override
-                public void release(String leaseId) {
-                    released.set(true);
-                }
-
-                @Override
-                public void heartbeat(String leaseId) {
-                }
+            SupervisorClient.Lease lease = new SupervisorClient.Lease() {
+                @Override public String host() { return "127.0.0.1"; }
+                @Override public int port() { return workerSocket.getLocalPort(); }
+                @Override public long workerPid() { return 101L; }
+                @Override public void close() { leaseClosed.set(true); }
             };
+
+            SupervisorClient supervisorClient = (workspacePath, jdtlsCommand) -> lease;
 
             ByteArrayOutputStream output = new ByteArrayOutputStream();
             LauncherMain.run(
@@ -71,7 +56,7 @@ class LauncherMainIntegrationTest {
 
             assertThat(workerHandled.await(2, TimeUnit.SECONDS)).isTrue();
             assertThat(output.toString()).isEqualTo("pong");
-            assertThat(released).isTrue();
+            assertThat(leaseClosed).isTrue();
         }
     }
 }

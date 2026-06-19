@@ -2,12 +2,11 @@ package com.saloidvl.lsp4jmcp.server;
 
 import com.saloidvl.lsp4jmcp.client.JdtlsClient;
 import com.saloidvl.lsp4jmcp.client.JdtlsLanguageClient;
-import org.junit.jupiter.api.Test;
-
 import java.io.ByteArrayInputStream;
 import java.io.OutputStream;
 import java.nio.file.Path;
 import java.util.Set;
+import org.junit.jupiter.api.Test;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
@@ -30,12 +29,6 @@ class JavaMcpServerTest {
     }
 
     @Test
-    void registeredToolNames_matchExpectedInventory() {
-        assertThatCode(() -> JavaMcpServer.registeredToolNames())
-            .doesNotThrowAnyException();
-    }
-
-    @Test
     void registeredToolNames_includeRecoveryTools() {
         assertThat(JavaMcpServer.registeredToolNames()).contains("restart_jdtls", "reindex_workspace");
     }
@@ -48,7 +41,7 @@ class JavaMcpServerTest {
             "find_definition",
             "document_symbols",
             "indexing_status",
-            "find_interfaces_with_method",
+            "find_method_declarations",
             "restart_jdtls",
             "reindex_workspace",
             "find_implementations",
@@ -57,7 +50,12 @@ class JavaMcpServerTest {
             "find_outgoing_calls",
             "get_diagnostics",
             "refresh_diagnostics",
-            "resolve_stack_trace"
+            "resolve_stack_trace",
+            "decompile_class",
+            "get_type_hierarchy",
+            "get_type_definition",
+            "get_projects",
+            "get_classpath"
         ));
     }
 }

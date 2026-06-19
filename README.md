@@ -1,38 +1,6 @@
 # LSP4J-MCP Server
 
-[![CI](https://github.com/saloidvl/lsp4j-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/saloidvl/lsp4j-mcp/actions/workflows/ci.yml)
-
-LSP4J-MCP is a Java MCP server for Java codebases. It wraps Eclipse JDT Language Server through LSP4J and exposes Java navigation and symbol-search tools to MCP clients.
-
-The packaged entrypoint is now a local `launcher`, not the heavy analysis backend itself. The launcher keeps the MCP client contract on `stdio`, talks to a shared local `supervisor`, and reuses one `repo worker` plus one `JDTLS` process per repository.
-
-## Based On
-
-This is a fork of [devoxx/lsp4j-mcp](https://github.com/devoxx/lsp4j-mcp) with a major architectural overhaul.
-
-Key changes from the original:
-
-- New multi-process runtime: `LauncherMain` → `SupervisorMain` → `RepoWorkerMain`
-- Shared JDTLS instance per repository — multiple agents reuse one backend, no duplicate indexing
-- Unix domain socket + TCP IPC replacing the original direct subprocess model
-- Added `find_interfaces_with_method` tool
-- Automatic JDTLS crash recovery with back-to-back recovery protection
-- Full test suite added
-
-## What It Is
-
-Use this server when you want an MCP-compatible client to inspect a Java repository through JDTLS-backed tools such as symbol lookup, reference search, go-to-definition, and document symbol listing.
-
-## Tools
-
-| Tool | Input | Output |
-|------|-------|--------|
-| `find_symbols` | Symbol name (string, supports wildcards) | List of matching symbols with file locations |
-| `find_references` | File path, line, character | All usages of the symbol at that position |
-| `find_definition` | File path, line, character | Definition location(s) of the symbol at that position |
-| `document_symbols` | File path | All symbols declared in that Java file |
-| `indexing_status` | — | Whether JDTLS indexing is still in progress |
-| `find_interfaces_with_method` | Method name | Interfaces that declare a method with that name |
+An MCP server for Java codebases. It wraps [Eclipse JDT Language Server](https://github.com/eclipse-jdtls/eclipse.jdt.ls) (JDTLS) through [LSP4J](https://github.com/eclipse-lsp4j/lsp4j) and exposes Java navigation and symbol-search tools to any MCP-compatible client.
 
 ## Runtime Model
 
@@ -42,93 +10,90 @@ MCP Client -> LauncherMain -> SupervisorMain -> RepoWorkerMain -> JDTLS -> Java 
 
 Rules:
 
-- one local `supervisor` process per machine
+- one `supervisor` process per machine
 - one `repo worker` per active repository
 - one `JDTLS` process per active repository
-- many MCP clients can share the same repository worker
+- many MCP clients can share the same worker
 
-This reduces duplicate indexing and prevents every agent or sub-agent from starting its own heavy backend for the same repo.
+This prevents every agent or sub-agent from spinning up its own heavy backend for the same repo.
 
-The current IPC design is optimized for macOS and Linux:
+IPC:
 
-- MCP client to launcher: `stdio`
-- launcher to supervisor: Unix domain socket
-- launcher to repo worker: `127.0.0.1` TCP on an ephemeral port
+- MCP client → launcher: `stdio`
+- launcher → supervisor: Unix domain socket
+- launcher → repo worker: `127.0.0.1` TCP on an ephemeral port
+
+## Tools
+
+| Tool                       | Description                                                                              |
+|----------------------------|------------------------------------------------------------------------------------------|
+| `find_symbols`             | Search for Java symbols (classes, methods, fields) by name                               |
+| `find_references`          | Find all references to a symbol at a given file location                                 |
+| `find_definition`          | Go to the definition of a symbol at a given file location                                |
+| `document_symbols`         | List all symbols declared in a Java file                                                 |
+| `find_implementations`     | Find all implementations of an interface method or abstract method                       |
+| `find_method_declarations` | Find interfaces or classes that declare a method with the given name                     |
+| `find_incoming_calls`      | Find all call sites where a method is called from                                        |
+| `find_outgoing_calls`      | Find all methods called by a given method                                                |
+| `get_hover`                | Get type signature and Javadoc for the symbol at a given position                        |
+| `resolve_stack_trace`      | Resolve a Java stack frame to its source file and line number                            |
+| `get_diagnostics`          | Return cached compiler diagnostics; supports per-file or workspace summary               |
+| `refresh_diagnostics`      | Trigger a full workspace build to refresh the diagnostics cache                          |
+| `indexing_status`          | Report current JDTLS health (starting / indexing / ready / degraded / failed)           |
+| `restart_jdtls`            | Soft-restart JDTLS without deleting workspace state                                      |
+| `reindex_workspace`        | Clean-restart JDTLS and force a full reimport and reindex                                |
+| `decompile_class`          | Decompile a dependency class file (jdt:// or jar: URI from `find_definition`) to source  |
+| `get_type_hierarchy`       | Get supertypes and subtypes for the type at a given position                             |
+| `get_type_definition`      | Resolve the declared type of the symbol at a given position                              |
+| `get_projects`             | List all Java projects in the workspace                                                  |
+| `get_classpath`            | Get source directories and JAR dependencies for the project containing a given file      |
 
 ## Requirements
 
 - Java 21+
-- Maven 3.8+ (only if building from source)
-- JDTLS available on the machine where the worker runs
-- macOS or Linux recommended for the shared-runtime path
+- macOS or Linux (Windows is untested)
+- JDTLS installed and available in `PATH`
 
-## Installing JDTLS
+## Install JDTLS
 
-Homebrew on macOS:
+**macOS (Homebrew):**
 
 ```bash
 brew install jdtls
 ```
 
-If you do not use Homebrew, install Eclipse JDT Language Server from the official project and make sure the executable is available in `PATH`, or pass the full command as the last argument when starting the launcher.
+**Linux / manual:** download from [eclipse-jdtls/eclipse.jdt.ls releases](https://github.com/eclipse-jdtls/eclipse.jdt.ls/releases) and put the `jdtls` wrapper script on your `PATH`.
 
-## Install
-
-Download the latest JAR from the [Releases page](https://github.com/saloidvl/lsp4j-mcp/releases):
+## Build
 
 ```bash
-# Example — replace version as needed
-curl -L -o lsp4j-mcp.jar \
-  https://github.com/saloidvl/lsp4j-mcp/releases/latest/download/lsp4j-mcp-1.0.6.jar
+git clone https://github.com/saloidvl/LSP4J-MCP.git
+cd LSP4J-MCP
+mvn clean package -DskipTests
 ```
 
-## Build from Source
+This produces a shaded JAR at `target/lsp4j-mcp-<version>.jar`.
+
+To run tests (unit tests only, no JDTLS required):
 
 ```bash
-mvn clean package
+mvn test
 ```
 
-This produces a shaded JAR in `target/`. Run it directly from there:
+## Run
 
 ```bash
 java -jar target/lsp4j-mcp-<version>.jar /path/to/java/workspace jdtls
 ```
 
-## Running
-
 Arguments:
 
-1. Java workspace root to analyze
-2. JDTLS command to start, for example `jdtls`
+1. Absolute path to the Java workspace root
+2. JDTLS command — `jdtls` if it is on your `PATH`, or a full path otherwise
 
-```bash
-java -jar lsp4j-mcp.jar /path/to/java/workspace jdtls
-```
+## MCP Client Configuration
 
-The launched process is `LauncherMain`. On the first connection for a repository it starts a shared local supervisor and a per-repository worker if needed. Later clients for the same repository reuse that worker and its single `JDTLS` process.
-
-## Connecting From Any MCP Client
-
-The MCP client contract is a local process over `stdio`:
-
-```json
-{
-  "command": "java",
-  "args": [
-    "-jar",
-    "/path/to/lsp4j-mcp.jar",
-    "/path/to/java/workspace",
-    "jdtls"
-  ],
-  "env": {
-    "LOG_FILE": "/tmp/lsp4j-mcp.log"
-  }
-}
-```
-
-## Claude Code Example
-
-Add to `.mcp.json`:
+### Claude Code (`.mcp.json`)
 
 ```json
 {
@@ -137,7 +102,7 @@ Add to `.mcp.json`:
       "command": "java",
       "args": [
         "-jar",
-        "/path/to/lsp4j-mcp.jar",
+        "/path/to/LSP4J-MCP/target/lsp4j-mcp-2.2.1.jar",
         "/path/to/java/workspace",
         "jdtls"
       ],
@@ -149,27 +114,90 @@ Add to `.mcp.json`:
 }
 ```
 
-## Releasing
+### Generic MCP Client
 
-```bash
-./scripts/release.sh 1.1.0
+```json
+{
+  "command": "java",
+  "args": [
+    "-jar",
+    "/path/to/lsp4j-mcp-2.2.1.jar",
+    "/path/to/java/workspace",
+    "jdtls"
+  ],
+  "env": {
+    "LOG_FILE": "/tmp/lsp4j-mcp.log"
+  }
+}
 ```
-
-This validates the working tree, bumps `pom.xml`, builds, commits, tags, and pushes. GitHub Actions then creates the GitHub Release with the JAR attached.
-
-## Development Notes
-
-- Production code lives under `src/main/java/com/saloidvl/lsp4jmcp/`
-- `target/` is build output only
-- Run tests with `mvn test`
-- `JdtlsClientIntegrationTest` requires `JDTLS_PATH` to be set
 
 ## Logging
 
-Logs are written to `LOG_FILE` if provided, otherwise to `/tmp/lsp4j-mcp.log`.
+Logs are written to `LOG_FILE` (default: `/tmp/lsp4j-mcp.log`). A separate `.error` file captures ERROR-level entries only. Both files rotate at 50 MB / 10 MB respectively.
 
-`stdout` is reserved for MCP protocol traffic between the MCP client and launcher, so diagnostic logs should go to the log file, not to standard output.
+`stdout` is reserved for MCP protocol traffic — never redirect logs there.
+
+**Environment variables:**
+
+| Variable    | Default                 | Description                                              |
+|-------------|-------------------------|----------------------------------------------------------|
+| `LOG_FILE`  | `/tmp/lsp4j-mcp.log`    | Path to the main log file                                |
+| `LOG_LEVEL` | `INFO`                  | Logback level: `TRACE`, `DEBUG`, `INFO`, `WARN`, `ERROR` |
+
+Example — enable debug logging:
+
+```json
+{
+  "env": {
+    "LOG_FILE": "/tmp/lsp4j-mcp.log",
+    "LOG_LEVEL": "DEBUG"
+  }
+}
+```
+
+## Lombok Support
+
+If the analyzed project uses Lombok, the server automatically searches for `lombok.jar` in:
+
+1. Maven local repository (`~/.m2/repository/org/projectlombok/lombok/`)
+2. Gradle caches (`~/.gradle/caches/modules-2/files-2.1/org.projectlombok/lombok/`)
+
+When found, it injects `-javaagent:/path/to/lombok.jar` into the JDTLS JVM at startup.
+
+If auto-detection fails, set `LOMBOK_JAR` explicitly:
+
+```json
+{
+  "env": {
+    "LOMBOK_JAR": "/Users/me/.m2/repository/org/projectlombok/lombok/1.18.34/lombok-1.18.34.jar"
+  }
+}
+```
+
+## Gradle: Preventing `bin/` in Project Root
+
+When JDTLS imports a Gradle project via Buildship it creates a `bin/` folder in the project root. To redirect it into `build/` (which IDEs exclude automatically), create `~/.gradle/init.d/eclipse-output-redirect.gradle`:
+
+```groovy
+import org.gradle.util.GradleVersion
+
+allprojects {
+    afterEvaluate { project ->
+        if (project.plugins.hasPlugin('java')) {
+            project.apply plugin: 'eclipse'
+
+            if (GradleVersion.current() >= GradleVersion.version('8.1')) {
+                project.eclipse.classpath.baseSourceOutputDir.set(
+                        project.file("${project.buildDir}/classes/jdtls-bin")
+                )
+            }
+        }
+    }
+}
+```
+
+Requires Gradle 8.1+. Delete any existing `bin/` manually after applying — it will not be recreated.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT

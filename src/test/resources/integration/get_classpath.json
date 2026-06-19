@@ -1,0 +1,11 @@
+{
+  "sources": [
+    "$FIXTURE/src/main/java",
+    "$FIXTURE/src/main/resources",
+    "$FIXTURE/src/test/java",
+    "$FIXTURE/src/test/resources",
+    "$FIXTURE/target/generated-sources/annotations",
+    "$FIXTURE/target/generated-test-sources/test-annotations"
+  ],
+  "jars": []
+}

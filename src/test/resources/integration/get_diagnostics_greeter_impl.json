@@ -1,0 +1,18 @@
+{
+  "file": "$FIXTURE/src/main/java/com/example/sample/GreeterImpl.java",
+  "diagnostics": [
+    {
+      "severity": "Warning",
+      "message": {
+        "left": "The method buildMessage(String) from the type MessageHelper is deprecated",
+        "right": null
+      },
+      "code": "67108967",
+      "line": 7,
+      "character": 30
+    }
+  ],
+  "cached": true,
+  "timestamp": "2026-06-10T11:47:52.392031Z",
+  "cache_updated_at_ms": 1781092073216
+}

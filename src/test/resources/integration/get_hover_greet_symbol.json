@@ -1,0 +1,5 @@
+{
+  "found": true,
+  "content": "String com.example.sample.GreeterImpl.greet(String name)\n\nSource: *[java-sample](file://$FIXTURE/src/main/java/com/example/sample/GreeterImpl.java#6)*",
+  "range": null
+}
