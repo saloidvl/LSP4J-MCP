@@ -1,0 +1,15 @@
+{
+  "methodName": "load",
+  "count": 1,
+  "methods": [
+    {
+      "name": "load(String)",
+      "kind": "Method",
+      "container": "DataPort",
+      "file": "/Users/vladimirsaloid/work/LSP4J-MCP/src/it/fixtures/java-sample/src/main/java/com/example/sample/DataPort.java",
+      "line": 4,
+      "column": 5,
+      "containerKind": "Interface"
+    }
+  ]
+}

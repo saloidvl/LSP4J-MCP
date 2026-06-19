@@ -14,7 +14,7 @@ import java.util.concurrent.TimeUnit;
 public interface WorkerProcessLauncher {
     StartedWorker start(Path workspacePath, String jdtlsCommand) throws Exception;
 
-    record StartedWorker(long workerPid, String host, int port) {
+    record StartedWorker(Process process, long workerPid, String host, int port) {
     }
 
     final class JvmWorkerProcessLauncher implements WorkerProcessLauncher {
@@ -44,7 +44,13 @@ public interface WorkerProcessLauncher {
                 }
 
                 int port = Integer.parseInt(firstLine.substring("READY ".length()).trim());
-                return new StartedWorker(process.pid(), "127.0.0.1", port);
+                Thread drain = new Thread(() -> {
+                    try { process.getInputStream().transferTo(java.io.OutputStream.nullOutputStream()); }
+                    catch (Exception ignored) {}
+                });
+                drain.setDaemon(true);
+                drain.start();
+                return new StartedWorker(process, process.pid(), "127.0.0.1", port);
             }
         }
     }

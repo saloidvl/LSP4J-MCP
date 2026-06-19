@@ -1,0 +1,13 @@
+{
+  "found": true,
+  "count": 1,
+  "implementations": [
+    {
+      "file": "/Users/vladimirsaloid/work/LSP4J-MCP/src/it/fixtures/java-sample/src/main/java/com/example/sample/GreeterImpl.java",
+      "startLine": 6,
+      "startColumn": 19,
+      "endLine": 6,
+      "endColumn": 24
+    }
+  ]
+}

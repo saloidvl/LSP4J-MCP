@@ -7,7 +7,7 @@ public record RepoWorkspace(Path canonicalPath, String repoId) {
 
     public static RepoWorkspace fromPath(Path path) throws IOException {
         Path canonical = path.toRealPath();
-        String repoId = "%08x".formatted(canonical.toString().hashCode());
+        String repoId = canonical.toString();
         return new RepoWorkspace(canonical, repoId);
     }
 }

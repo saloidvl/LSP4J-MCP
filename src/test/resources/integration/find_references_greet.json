@@ -1,0 +1,22 @@
+{
+  "file": "/Users/vladimirsaloid/work/LSP4J-MCP/src/it/fixtures/java-sample/src/main/java/com/example/sample/GreeterImpl.java",
+  "line": 6,
+  "character": 20,
+  "count": 2,
+  "references": [
+    {
+      "file": "/Users/vladimirsaloid/work/LSP4J-MCP/src/it/fixtures/java-sample/src/main/java/com/example/sample/App.java",
+      "startLine": 7,
+      "startColumn": 34,
+      "endLine": 7,
+      "endColumn": 48
+    },
+    {
+      "file": "/Users/vladimirsaloid/work/LSP4J-MCP/src/it/fixtures/java-sample/src/main/java/com/example/sample/GreeterImpl.java",
+      "startLine": 6,
+      "startColumn": 19,
+      "endLine": 6,
+      "endColumn": 24
+    }
+  ]
+}

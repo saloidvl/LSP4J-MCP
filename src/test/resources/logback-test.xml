@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<configuration>
+    <appender name="FILE" class="ch.qos.logback.core.FileAppender">
+        <file>${project.basedir:-${user.dir}}/logs/test-integration.log</file>
+        <encoder>
+            <pattern>%d{HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n</pattern>
+        </encoder>
+    </appender>
+
+    <logger name="com.saloidvl.lsp4jmcp" level="DEBUG"/>
+    <logger name="org.eclipse.lsp4j" level="DEBUG"/>
+    <logger name="org.eclipse.jdt" level="DEBUG"/>
+
+    <root level="DEBUG">
+        <appender-ref ref="FILE"/>
+    </root>
+</configuration>

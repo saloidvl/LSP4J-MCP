@@ -1,0 +1,22 @@
+{
+  "query": "Greeter",
+  "count": 2,
+  "symbols": [
+    {
+      "name": "Greeter",
+      "kind": "Interface",
+      "container": "com.example.sample",
+      "file": "/Users/vladimirsaloid/work/LSP4J-MCP/src/it/fixtures/java-sample/src/main/java/com/example/sample/Greeter.java",
+      "line": 4,
+      "column": 18
+    },
+    {
+      "name": "GreeterImpl",
+      "kind": "Class",
+      "container": "com.example.sample",
+      "file": "/Users/vladimirsaloid/work/LSP4J-MCP/src/it/fixtures/java-sample/src/main/java/com/example/sample/GreeterImpl.java",
+      "line": 3,
+      "column": 14
+    }
+  ]
+}

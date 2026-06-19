@@ -35,14 +35,11 @@
         </encoder>
     </appender>
 
-    <!-- Our code at DEBUG level -->
-    <logger name="com.saloidvl.lsp4jmcp" level="DEBUG"/>
+    <logger name="com.saloidvl.lsp4jmcp" level="${LOG_LEVEL:-INFO}"/>
+    <logger name="org.eclipse.lsp4j" level="${LOG_LEVEL:-INFO}"/>
+    <logger name="org.eclipse.jdt" level="${LOG_LEVEL:-INFO}"/>
 
-    <!-- JDTLS and LSP4J can be noisy -->
-    <logger name="org.eclipse.lsp4j" level="INFO"/>
-    <logger name="org.eclipse.jdt" level="INFO"/>
-
-    <root level="INFO">
+    <root level="${LOG_LEVEL:-INFO}">
         <appender-ref ref="FILE"/>
         <appender-ref ref="FILE_ERROR"/>
     </root>

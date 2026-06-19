@@ -1,13 +1,13 @@
 package com.saloidvl.lsp4jmcp.worker;
 
 import com.saloidvl.lsp4jmcp.client.JdtlsClient;
+import com.saloidvl.lsp4jmcp.client.LombokSupport;
 import com.saloidvl.lsp4jmcp.runtime.RuntimeConstants;
 import com.saloidvl.lsp4jmcp.server.JavaMcpServer;
 import io.modelcontextprotocol.server.McpSyncServer;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
+import java.io.FilterInputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.PrintStream;
 import java.net.InetAddress;
 import java.net.ServerSocket;
@@ -15,8 +15,12 @@ import java.net.Socket;
 import java.net.SocketException;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicReference;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 public final class RepoWorkerMain {
     private static final Logger LOG = LoggerFactory.getLogger(RepoWorkerMain.class);
@@ -132,18 +136,55 @@ public final class RepoWorkerMain {
 
         @Override
         public void initialize() throws Exception {
-            this.client = JdtlsClient.createAndInitialize(workspace, jdtlsCommand);
+            Optional<Path> lombokJar = LombokSupport.detectAndFind(workspace);
+            this.client = JdtlsClient.createAndInitializeAsync(workspace, jdtlsCommand, lombokJar);
         }
 
         @Override
         public void handle(Socket socket) throws Exception {
-            McpSyncServer server = JavaMcpServer.create(
-                socket.getInputStream(),
-                socket.getOutputStream(),
-                client,
-                workspace
-            );
+            CompletableFuture<Void> connectionDone = new CompletableFuture<>();
+            InputStream tracked = new FilterInputStream(socket.getInputStream()) {
+                private void signalDone() {
+                    connectionDone.complete(null);
+                }
+
+                @Override
+                public int read() throws IOException {
+                    try {
+                        int b = super.read();
+                        if (b == -1) signalDone();
+                        return b;
+                    } catch (IOException e) {
+                        signalDone();
+                        throw e;
+                    }
+                }
+
+                @Override
+                public int read(byte[] b, int off, int len) throws IOException {
+                    try {
+                        int n = super.read(b, off, len);
+                        if (n == -1) signalDone();
+                        return n;
+                    } catch (IOException e) {
+                        signalDone();
+                        throw e;
+                    }
+                }
+
+                @Override
+                public void close() throws IOException {
+                    signalDone();
+                    super.close();
+                }
+            };
+            McpSyncServer server = JavaMcpServer.create(tracked, socket.getOutputStream(), client, workspace);
             activeServers.add(server);
+            connectionDone.whenCompleteAsync((v, ex) -> {
+                activeServers.remove(server);
+                try { server.close(); } catch (Exception ignored) {}
+                try { socket.close(); } catch (Exception ignored) {}
+            });
         }
 
         @Override

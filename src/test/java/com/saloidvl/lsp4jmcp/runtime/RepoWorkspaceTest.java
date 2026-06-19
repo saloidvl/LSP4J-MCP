@@ -18,7 +18,7 @@ class RepoWorkspaceTest {
         RepoWorkspace workspace = RepoWorkspace.fromPath(repo);
 
         assertThat(workspace.canonicalPath()).isEqualTo(repo.toRealPath());
-        assertThat(workspace.repoId()).matches("[0-9a-f]{8,}");
+        assertThat(workspace.repoId()).isNotBlank();
     }
 
     @Test

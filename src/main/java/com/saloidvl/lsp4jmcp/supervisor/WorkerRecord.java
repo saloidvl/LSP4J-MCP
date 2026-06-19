@@ -2,25 +2,29 @@ package com.saloidvl.lsp4jmcp.supervisor;
 
 import java.nio.file.Path;
 import java.time.Instant;
-import java.util.HashMap;
-import java.util.Map;
+import java.util.HashSet;
+import java.util.Set;
+import java.util.concurrent.ScheduledFuture;
 
 final class WorkerRecord {
     private final String repoId;
     private final Path workspacePath;
     private final String jdtlsCommand;
-    private final Map<String, Instant> leases = new HashMap<>();
+    private final Set<Object> leases = new HashSet<>();
 
+    private Process process;
     private long workerPid;
     private String host;
     private int port;
     private WorkerState state;
     private Instant lastLeaseReleasedAt;
+    private ScheduledFuture<?> pendingIdleShutdown;
 
-    WorkerRecord(String repoId, Path workspacePath, String jdtlsCommand, long workerPid, String host, int port, WorkerState state) {
+    WorkerRecord(String repoId, Path workspacePath, String jdtlsCommand, Process process, long workerPid, String host, int port, WorkerState state) {
         this.repoId = repoId;
         this.workspacePath = workspacePath;
         this.jdtlsCommand = jdtlsCommand;
+        this.process = process;
         this.workerPid = workerPid;
         this.host = host;
         this.port = port;
@@ -37,6 +41,10 @@ final class WorkerRecord {
 
     String jdtlsCommand() {
         return jdtlsCommand;
+    }
+
+    Process process() {
+        return process;
     }
 
     long workerPid() {
@@ -67,30 +75,32 @@ final class WorkerRecord {
         return lastLeaseReleasedAt;
     }
 
-    void addLease(String leaseId, Instant now) {
-        leases.put(leaseId, now);
+    ScheduledFuture<?> pendingIdleShutdown() {
+        return pendingIdleShutdown;
+    }
+
+    void setPendingIdleShutdown(ScheduledFuture<?> future) {
+        this.pendingIdleShutdown = future;
+    }
+
+    void addLease(Object handle) {
+        leases.add(handle);
         lastLeaseReleasedAt = null;
-    }
-
-    boolean hasLease(String leaseId) {
-        return leases.containsKey(leaseId);
-    }
-
-    void touchLease(String leaseId, Instant now) {
-        if (leases.containsKey(leaseId)) {
-            leases.put(leaseId, now);
+        if (pendingIdleShutdown != null) {
+            pendingIdleShutdown.cancel(false);
+            pendingIdleShutdown = null;
         }
     }
 
-    boolean removeLease(String leaseId, Instant now) {
-        boolean removed = leases.remove(leaseId) != null;
+    boolean removeLease(Object handle, Instant now) {
+        boolean removed = leases.remove(handle);
         if (removed && leases.isEmpty()) {
             lastLeaseReleasedAt = now;
         }
         return removed;
     }
 
-    Map<String, Instant> leases() {
+    Set<Object> leases() {
         return leases;
     }
 }

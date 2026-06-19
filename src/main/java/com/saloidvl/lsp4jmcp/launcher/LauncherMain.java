@@ -1,6 +1,5 @@
 package com.saloidvl.lsp4jmcp.launcher;
 
-import com.saloidvl.lsp4jmcp.control.SupervisorResponse;
 import com.saloidvl.lsp4jmcp.runtime.RuntimeConstants;
 import com.saloidvl.lsp4jmcp.supervisor.SupervisorClient;
 import org.slf4j.Logger;
@@ -12,9 +11,6 @@ import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.nio.file.Path;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.TimeUnit;
 
 public final class LauncherMain {
     private static final Logger LOG = LoggerFactory.getLogger(LauncherMain.class);
@@ -51,56 +47,28 @@ public final class LauncherMain {
             InputStream clientInput,
             OutputStream clientOutput,
             SupervisorClient supervisorClient) throws Exception {
-        SupervisorResponse acquireResponse = supervisorClient.acquire(workspace, jdtlsCommand);
-        if (!acquireResponse.ok()) {
-            throw new IllegalStateException(acquireResponse.message());
-        }
-
-        ScheduledExecutorService heartbeatExecutor = Executors.newSingleThreadScheduledExecutor();
-
-        try (Socket socket = new Socket()) {
-            socket.connect(
-                new InetSocketAddress(acquireResponse.host(), acquireResponse.port()),
-                Math.toIntExact(RuntimeConstants.WORKER_TCP_CONNECT_TIMEOUT.toMillis())
-            );
-
-            heartbeatExecutor.scheduleAtFixedRate(
-                () -> {
-                    try {
-                        supervisorClient.heartbeat(acquireResponse.leaseId());
-                    } catch (Exception ignored) {
-                    }
-                },
-                Math.max(1, RuntimeConstants.LEASE_HEARTBEAT_INTERVAL.toMillis()),
-                Math.max(1, RuntimeConstants.LEASE_HEARTBEAT_INTERVAL.toMillis()),
-                TimeUnit.MILLISECONDS
-            );
-
-            Thread upstream = new Thread(() -> copyClientToWorker(clientInput, socket));
-            upstream.start();
-
-            copy(socket.getInputStream(), clientOutput);
-            upstream.join();
-        } finally {
-            heartbeatExecutor.shutdownNow();
-            supervisorClient.release(acquireResponse.leaseId());
+        try (SupervisorClient.Lease lease = supervisorClient.openLease(workspace, jdtlsCommand)) {
+            try (Socket socket = new Socket()) {
+                socket.connect(
+                    new InetSocketAddress(lease.host(), lease.port()),
+                    Math.toIntExact(RuntimeConstants.WORKER_TCP_CONNECT_TIMEOUT.toMillis())
+                );
+                Thread upstream = Thread.startVirtualThread(() -> copyClientToWorker(clientInput, socket));
+                copy(socket.getInputStream(), clientOutput);
+                upstream.join();
+            }
         }
     }
 
     private static void copyClientToWorker(InputStream clientInput, Socket socket) {
         try {
-            copy(clientInput, socket.getOutputStream());
+            clientInput.transferTo(socket.getOutputStream());
             socket.shutdownOutput();
         } catch (IOException ignored) {
         }
     }
 
     private static void copy(InputStream input, OutputStream output) throws IOException {
-        byte[] buffer = new byte[8192];
-        int read;
-        while ((read = input.read(buffer)) != -1) {
-            output.write(buffer, 0, read);
-            output.flush();
-        }
+        input.transferTo(output);
     }
 }

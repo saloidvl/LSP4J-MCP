@@ -1,23 +1,67 @@
 package com.saloidvl.lsp4jmcp.client;
 
 import com.saloidvl.lsp4jmcp.runtime.RuntimeConstants;
-import org.eclipse.lsp4j.*;
-import org.eclipse.lsp4j.jsonrpc.messages.Either;
-import org.eclipse.lsp4j.jsonrpc.Launcher;
-import org.eclipse.lsp4j.services.LanguageServer;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
-import java.io.*;
+import java.io.IOException;
 import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.ArrayList;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.Comparator;
 import java.util.List;
-import java.util.Set;
-import java.util.concurrent.*;
-import java.util.concurrent.atomic.AtomicLong;
+import java.util.Map;
+import java.util.Optional;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import org.eclipse.lsp4j.CallHierarchyIncomingCall;
+import org.eclipse.lsp4j.CallHierarchyIncomingCallsParams;
+import org.eclipse.lsp4j.CallHierarchyItem;
+import org.eclipse.lsp4j.CallHierarchyOutgoingCall;
+import org.eclipse.lsp4j.CallHierarchyOutgoingCallsParams;
+import org.eclipse.lsp4j.CallHierarchyPrepareParams;
+import org.eclipse.lsp4j.ClientCapabilities;
+import org.eclipse.lsp4j.DefinitionCapabilities;
+import org.eclipse.lsp4j.DefinitionParams;
+import org.eclipse.lsp4j.DidOpenTextDocumentParams;
+import org.eclipse.lsp4j.DocumentSymbol;
+import org.eclipse.lsp4j.DocumentSymbolCapabilities;
+import org.eclipse.lsp4j.DocumentSymbolParams;
+import org.eclipse.lsp4j.ExecuteCommandParams;
+import org.eclipse.lsp4j.Hover;
+import org.eclipse.lsp4j.HoverParams;
+import org.eclipse.lsp4j.ImplementationParams;
+import org.eclipse.lsp4j.InitializeParams;
+import org.eclipse.lsp4j.InitializeResult;
+import org.eclipse.lsp4j.InitializedParams;
+import org.eclipse.lsp4j.Location;
+import org.eclipse.lsp4j.Position;
+import org.eclipse.lsp4j.ReferenceContext;
+import org.eclipse.lsp4j.ReferenceParams;
+import org.eclipse.lsp4j.ReferencesCapabilities;
+import org.eclipse.lsp4j.ServerCapabilities;
+import org.eclipse.lsp4j.SymbolCapabilities;
+import org.eclipse.lsp4j.SymbolInformation;
+import org.eclipse.lsp4j.TextDocumentClientCapabilities;
+import org.eclipse.lsp4j.TextDocumentIdentifier;
+import org.eclipse.lsp4j.TextDocumentItem;
+import org.eclipse.lsp4j.TypeDefinitionCapabilities;
+import org.eclipse.lsp4j.TypeDefinitionParams;
+import org.eclipse.lsp4j.TypeHierarchyCapabilities;
+import org.eclipse.lsp4j.TypeHierarchyItem;
+import org.eclipse.lsp4j.TypeHierarchyPrepareParams;
+import org.eclipse.lsp4j.TypeHierarchySubtypesParams;
+import org.eclipse.lsp4j.TypeHierarchySupertypesParams;
+import org.eclipse.lsp4j.WorkspaceClientCapabilities;
+import org.eclipse.lsp4j.WorkspaceFolder;
+import org.eclipse.lsp4j.WorkspaceSymbol;
+import org.eclipse.lsp4j.WorkspaceSymbolParams;
+import org.eclipse.lsp4j.jsonrpc.messages.Either;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * LSP client that connects to JDTLS (Eclipse JDT Language Server).
@@ -28,178 +72,121 @@ public class JdtlsClient implements AutoCloseable {
     private static final int INIT_TIMEOUT_SECONDS = 180;
     private static final long DIAGNOSTICS_SUMMARY_INTERVAL_SECONDS = 30;
 
-    public interface RuntimeSessionFactory {
-        RuntimeSession start(Path workspaceRoot, Path dataDir, String jdtlsCommand,
-                             JdtlsLanguageClient languageClient, long generation) throws Exception;
-    }
-
-    public static final class RuntimeSession {
-        private final long generation;
-        private final Process process;
-        private final LanguageServer languageServer;
-        private final Thread stderrThread;
-        private final Set<String> openedDocuments;
-
-        public RuntimeSession(long generation, Process process, LanguageServer languageServer,
-                              Thread stderrThread, Set<String> openedDocuments) {
-            this.generation = generation;
-            this.process = process;
-            this.languageServer = languageServer;
-            this.stderrThread = stderrThread;
-            this.openedDocuments = openedDocuments;
-        }
-
-        public long generation() {
-            return generation;
-        }
-
-        public Process process() {
-            return process;
-        }
-
-        public LanguageServer languageServer() {
-            return languageServer;
-        }
-
-        public Thread stderrThread() {
-            return stderrThread;
-        }
-
-        public Set<String> openedDocuments() {
-            return openedDocuments;
+    /**
+     * Returns the first 16 hex characters of the SHA-256 digest of the given workspace path.
+     */
+    static String computeWorkspaceHash(String workspacePath) {
+        try {
+            byte[] digest = MessageDigest.getInstance("SHA-256")
+                .digest(workspacePath.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            StringBuilder sb = new StringBuilder(digest.length * 2);
+            for (byte b : digest) {
+                sb.append(String.format("%02x", b));
+            }
+            return sb.substring(0, 16);
+        } catch (NoSuchAlgorithmException e) {
+            // SHA-256 is required by the Java SE spec and will always be available.
+            throw new IllegalStateException("SHA-256 not available", e);
         }
     }
 
     private final Path workspaceRoot;
     private final Path dataDir;
     private final String jdtlsCommand;
-    private final RuntimeSessionFactory sessionFactory;
     private final JdtlsLanguageClient languageClient;
     private final DiagnosticsCache diagnosticsCache;
-    private final Object stateLock = new Object();
-    private final AtomicLong generationCounter = new AtomicLong();
-    private final Set<Long> intentionallyClosingGenerations = ConcurrentHashMap.newKeySet();
-    private final List<Long> recoveryAttemptTimestamps = new CopyOnWriteArrayList<>();
-    private final ConcurrentMap<String, Integer> repeatedSignalCounts = new ConcurrentHashMap<>();
-    private final ExecutorService recoveryExecutor = Executors.newSingleThreadExecutor(r -> {
-        Thread thread = new Thread(r, "jdtls-recovery");
-        thread.setDaemon(true);
-        return thread;
-    });
-    private final ScheduledExecutorService diagnosticsSummaryExecutor = Executors.newSingleThreadScheduledExecutor(r -> {
-        Thread thread = new Thread(r, "jdtls-diagnostics-summary");
-        thread.setDaemon(true);
-        return thread;
-    });
+    final JdtlsRecoveryManager recovery;
+    private final JdtlsSessionManager sessions;
+    private final ScheduledExecutorService diagnosticsSummaryExecutor =
+        Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread thread = new Thread(r, "jdtls-diagnostics-summary");
+            thread.setDaemon(true);
+            return thread;
+        });
 
-    private volatile RuntimeSession session;
-    private volatile boolean initialized;
-    private volatile JdtlsClientState state = JdtlsClientState.STARTING;
-    private volatile String stateMessage = "Starting";
-    private volatile String lastRecoveryReason = "";
-    private volatile boolean recoveryInFlight;
-    private volatile boolean recoveryQueued;
-    private volatile int recoveryActionExecutionCount;
+    volatile boolean initialized;
     private volatile boolean closed;
-    private volatile JdtlsClientState activeRecoveryState;
-    private volatile JdtlsRecoveryAction activeRecoveryAction = JdtlsRecoveryAction.NONE;
-    private volatile JdtlsRecoveryAction pendingRecoveryAction = JdtlsRecoveryAction.NONE;
-    private volatile String pendingRecoveryReason = "";
+    private volatile Thread asyncInitThread;
 
     long shutdownTimeoutMs = RuntimeConstants.JDTLS_GRACEFUL_SHUTDOWN_TIMEOUT.toMillis();
     long selfExitPollMs = RuntimeConstants.JDTLS_SELF_EXIT_POLL_TIMEOUT.toMillis();
 
     public JdtlsClient(Path workspaceRoot, String jdtlsCommand) throws IOException {
-        this(workspaceRoot, jdtlsCommand, defaultRuntimeSessionFactory(), new DiagnosticsCache());
+        this(workspaceRoot, jdtlsCommand, JdtlsSessionManager.defaultFactory(), new DiagnosticsCache());
     }
 
-    JdtlsClient(Path workspaceRoot, String jdtlsCommand, RuntimeSessionFactory sessionFactory) throws IOException {
-        this(workspaceRoot, jdtlsCommand, sessionFactory, new DiagnosticsCache());
+    public JdtlsClient(Path workspaceRoot, String jdtlsCommand, Optional<Path> lombokJar) throws IOException {
+        this(workspaceRoot, jdtlsCommand, JdtlsSessionManager.defaultFactory(lombokJar), new DiagnosticsCache());
     }
 
-    JdtlsClient(Path workspaceRoot, String jdtlsCommand, RuntimeSessionFactory sessionFactory,
-                DiagnosticsCache diagnosticsCache) throws IOException {
+    private JdtlsClient(
+        Path workspaceRoot, String jdtlsCommand,
+        JdtlsSessionManager.RuntimeSessionFactory sessionFactory,
+        DiagnosticsCache diagnosticsCache) throws IOException {
         this.workspaceRoot = workspaceRoot;
         this.jdtlsCommand = jdtlsCommand;
-        this.sessionFactory = sessionFactory;
         this.diagnosticsCache = diagnosticsCache;
         this.languageClient = new JdtlsLanguageClient();
         this.languageClient.setDiagnosticsCache(diagnosticsCache);
-        String workspaceHash = Integer.toHexString(workspaceRoot.toString().hashCode());
+        this.languageClient.setWorkspaceRoot(workspaceRoot);
+        String workspaceHash = computeWorkspaceHash(workspaceRoot.toString());
         this.dataDir = Path.of(System.getProperty("java.io.tmpdir"), "jdtls-data", workspaceHash);
         Files.createDirectories(this.dataDir);
+        this.recovery = new JdtlsRecoveryManager(new JdtlsRecoveryManager.RecoveryActions() {
+            @Override
+            public void executeRestart(boolean cleanDataDir, String reason) throws Exception {
+                JdtlsClient.this.restartInternal(cleanDataDir, reason, false);
+            }
+
+            @Override
+            public boolean isClosed() {
+                return closed;
+            }
+
+            @Override
+            public boolean isRunning() {
+                return JdtlsClient.this.isRunning();
+            }
+
+            @Override
+            public boolean isInitialized() {
+                return initialized;
+            }
+        });
+        this.sessions = new JdtlsSessionManager(
+            sessionFactory,
+            exitCode -> {
+                JdtlsRecoveryAction action = JdtlsRecoveryClassifier.classifyProcessExited(exitCode);
+                if (action == JdtlsRecoveryAction.RESTART) {
+                    recovery.submitSignal(action, "JDTLS process exited with code " + exitCode);
+                } else {
+                    recovery.transitionTo(
+                        JdtlsClientState.FAILED,
+                        "JDTLS process exited",
+                        "exitCode=" + exitCode
+                    );
+                }
+            }
+        );
         wireLanguageClient();
         startDiagnosticsSummaryLoop();
         startSession();
     }
 
-    private static RuntimeSessionFactory defaultRuntimeSessionFactory() {
-        return (workspaceRoot, dataDir, jdtlsCommand, languageClient, generation) -> {
-            LOG.info("Starting JDTLS process: {} with workspace: {}", jdtlsCommand, workspaceRoot);
-            LOG.info("JDTLS data directory: {}", dataDir);
-
-            List<String> command = new ArrayList<>();
-            for (String part : jdtlsCommand.split("\\s+")) {
-                command.add(part);
-            }
-            command.add("-data");
-            command.add(dataDir.toString());
-
-            ProcessBuilder pb = new ProcessBuilder(command);
-            pb.redirectErrorStream(false);
-            pb.directory(workspaceRoot.toFile());
-
-            Process process = pb.start();
-            Thread stderrThread = createStderrThread(process);
-            stderrThread.setDaemon(true);
-            stderrThread.start();
-
-            try {
-                Thread.sleep(500);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-            }
-
-            if (!process.isAlive()) {
-                throw new IOException("JDTLS process exited immediately with code: " + process.exitValue());
-            }
-
-            Launcher<LanguageServer> launcher = Launcher.createLauncher(
-                languageClient,
-                LanguageServer.class,
-                process.getInputStream(),
-                process.getOutputStream()
-            );
-            LanguageServer languageServer = launcher.getRemoteProxy();
-            launcher.startListening();
-
-            return new RuntimeSession(
-                generation,
-                process,
-                languageServer,
-                stderrThread,
-                ConcurrentHashMap.newKeySet()
-            );
-        };
+    public Path getDataDir() {
+        return dataDir;
     }
 
-    private static Thread createStderrThread(Process process) {
-        return new Thread(() -> {
-            try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getErrorStream()))) {
-                String line;
-                while ((line = reader.readLine()) != null) {
-                    if (line.contains("OutOfMemoryError") || line.contains("Cannot allocate") || line.contains("GC overhead")) {
-                        LOG.error("JDTLS OOM: {}", line);
-                    } else if (line.contains("ERROR") || line.contains("Exception") || line.contains("Error:")) {
-                        LOG.warn("JDTLS stderr: {}", line);
-                    } else {
-                        LOG.debug("JDTLS stderr: {}", line);
-                    }
-                }
-            } catch (IOException e) {
-                LOG.warn("Error reading JDTLS stderr", e);
-            }
-        }, "jdtls-stderr");
+    public JdtlsRecoveryManager getRecoveryManager() {
+        return recovery;
+    }
+
+    public JdtlsSessionManager getSessionManager() {
+        return sessions;
+    }
+
+    public Thread getAsyncInitThread() {
+        return asyncInitThread;
     }
 
     private void wireLanguageClient() {
@@ -209,13 +196,21 @@ public class JdtlsClient implements AutoCloseable {
 
     private void onLanguageClientStatusChanged(JdtlsLanguageClient.LanguageClientSnapshot snapshot) {
         if (snapshot.ready()) {
-            transitionTo(JdtlsClientState.READY, "JDTLS ready", lastRecoveryReason);
-        } else if (recoveryInFlight && activeRecoveryState != null) {
-            transitionTo(activeRecoveryState, snapshot.statusMessage(), lastRecoveryReason);
+            transitionToIfOpen(JdtlsClientState.READY, "JDTLS ready", recovery.getLastRecoveryReason());
+            return;
+        }
+        JdtlsClientState recoveryState;
+        String recoveryReason;
+        synchronized (recovery.stateLock) {
+            recoveryState = recovery.isRecoveryInFlight() ? recovery.getActiveRecoveryState() : null;
+            recoveryReason = recovery.getLastRecoveryReason();
+        }
+        if (recoveryState != null) {
+            transitionToIfOpen(recoveryState, snapshot.statusMessage(), recoveryReason);
         } else if (initialized) {
-            transitionTo(JdtlsClientState.INDEXING, snapshot.statusMessage(), lastRecoveryReason);
+            transitionToIfOpen(JdtlsClientState.INDEXING, snapshot.statusMessage(), recoveryReason);
         } else {
-            transitionTo(JdtlsClientState.STARTING, snapshot.statusMessage(), lastRecoveryReason);
+            transitionToIfOpen(JdtlsClientState.STARTING, snapshot.statusMessage(), recoveryReason);
         }
     }
 
@@ -241,127 +236,29 @@ public class JdtlsClient implements AutoCloseable {
     }
 
     private void submitRecoverySignal(JdtlsRecoveryAction action, String reason) {
-        if (action == JdtlsRecoveryAction.NONE || closed) {
-            return;
-        }
-        String fingerprint = fingerprint(reason);
-        logRecoverySignal(fingerprint, reason, repeatedSignalCounts.merge(fingerprint, 1, Integer::sum));
-        synchronized (stateLock) {
-            if (closed) {
-                return;
-            }
-            if (recoveryQueued || recoveryInFlight) {
-                recordPendingRecoveryLocked(action, reason);
-                return;
-            }
-            recoveryQueued = true;
-        }
-        try {
-            recoveryExecutor.submit(() -> {
-                recoveryQueued = false;
-                handleRecoverySignal(action, reason, false);
-            });
-        } catch (RejectedExecutionException ex) {
-            recoveryQueued = false;
-            LOG.debug("Skipping recovery submission after shutdown: {}", ex.getMessage());
-        }
-    }
-
-    void handleRecoverySignal(JdtlsRecoveryAction action, String reason) {
-        handleRecoverySignal(action, reason, false);
-    }
-
-    private void handleRecoverySignal(JdtlsRecoveryAction action, String reason, boolean ignoreCooldown) {
-        if (action == JdtlsRecoveryAction.NONE || closed) {
-            return;
-        }
-        long now = System.currentTimeMillis();
-        pruneRecoveryAttempts(now);
-        if (!ignoreCooldown && withinRecoveryCooldown(now)) {
-            if (!isRunning()) {
-                transitionTo(JdtlsClientState.DEGRADED, "Automatic recovery suppressed", reason);
-            }
-            LOG.info("Skipping recovery for [{}] because cooldown is active", fingerprint(reason));
-            return;
-        }
-        if (recoveryAttemptTimestamps.size() >= RuntimeConstants.JDTLS_MAX_RECOVERY_ATTEMPTS) {
-            transitionTo(JdtlsClientState.DEGRADED, "Automatic recovery suppressed", reason);
-            return;
-        }
-        if (!beginRecovery(action, reason)) {
-            return;
-        }
-
-        try {
-            recoveryAttemptTimestamps.add(now);
-            recoveryActionExecutionCount++;
-            restartInternal(action == JdtlsRecoveryAction.REINDEX, reason, false);
-        } catch (Exception ex) {
-            LOG.warn("Automatic JDTLS recovery failed: {}", ex.getMessage());
-            transitionTo(JdtlsClientState.FAILED, "Automatic recovery failed", ex.getMessage());
-        } finally {
-            finishRecovery();
-            schedulePendingRecoveryIfAny();
-        }
-    }
-
-    private void pruneRecoveryAttempts(long now) {
-        long windowStart = now - RuntimeConstants.JDTLS_RECOVERY_WINDOW.toMillis();
-        recoveryAttemptTimestamps.removeIf(ts -> ts < windowStart);
-    }
-
-    private boolean withinRecoveryCooldown(long now) {
-        if (recoveryAttemptTimestamps.isEmpty()) {
-            return false;
-        }
-        long lastAttempt = recoveryAttemptTimestamps.get(recoveryAttemptTimestamps.size() - 1);
-        return now - lastAttempt < RuntimeConstants.JDTLS_RECOVERY_COOLDOWN.toMillis();
-    }
-
-    private void logRecoverySignal(String fingerprint, String reason, int count) {
-        if (count == 1) {
-            LOG.warn("JDTLS recovery signal detected [{}]: {}", fingerprint, reason);
-        } else {
-            LOG.warn("Repeated JDTLS recovery signal [{}] count={}: {}", fingerprint, count, reason);
-        }
-    }
-
-    private String fingerprint(String reason) {
-        if (reason == null) {
-            return "";
-        }
-        String normalized = reason.replaceAll("\\s+", " ").trim();
-        if (normalized.contains("code 368") || normalized.contains("File not found") || normalized.contains("NoSuchFileException")) {
-            return "stale-workspace-file-not-found";
-        }
-        return normalized;
+        recovery.submitSignal(action, reason);
     }
 
     private void transitionTo(JdtlsClientState nextState, String message, String reason) {
-        synchronized (stateLock) {
-            state = nextState;
-            stateMessage = message != null ? message : "";
-            lastRecoveryReason = reason != null ? reason : "";
-        }
+        recovery.transitionTo(nextState, message, reason);
+    }
+
+    private void transitionToIfOpen(JdtlsClientState nextState, String message, String reason) {
+        recovery.transitionToIfOpen(nextState, message, reason);
     }
 
     private synchronized void startSession() throws IOException {
+        if (closed) {
+            return;
+        }
         prepareLanguageClientForNewSession();
         try {
-            RuntimeSession newSession = sessionFactory.start(
-                workspaceRoot,
-                dataDir,
-                jdtlsCommand,
-                languageClient,
-                generationCounter.incrementAndGet()
-            );
-            this.session = newSession;
-            registerExitWatcher(newSession);
+            sessions.createSession(workspaceRoot, dataDir, jdtlsCommand, languageClient);
         } catch (IOException e) {
-            transitionTo(JdtlsClientState.FAILED, "Failed to start JDTLS", e.getMessage());
+            recovery.transitionTo(JdtlsClientState.FAILED, "Failed to start JDTLS", e.getMessage());
             throw e;
         } catch (Exception e) {
-            transitionTo(JdtlsClientState.FAILED, "Failed to start JDTLS", e.getMessage());
+            recovery.transitionTo(JdtlsClientState.FAILED, "Failed to start JDTLS", e.getMessage());
             throw new IOException("Failed to start JDTLS", e);
         }
     }
@@ -369,32 +266,8 @@ public class JdtlsClient implements AutoCloseable {
     private void prepareLanguageClientForNewSession() {
         initialized = false;
         languageClient.resetForNewSession();
-        if (!recoveryInFlight || activeRecoveryState == null) {
-            transitionTo(JdtlsClientState.STARTING, "Starting", lastRecoveryReason);
-        }
-    }
-
-    private void registerExitWatcher(RuntimeSession exitingSession) {
-        Thread watcher = new Thread(() -> {
-            try {
-                exitingSession.process().waitFor();
-                if (!intentionallyClosingGenerations.remove(exitingSession.generation())) {
-                    onProcessExited(exitingSession.process().exitValue());
-                }
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-            }
-        }, "jdtls-exit-watcher-" + exitingSession.generation());
-        watcher.setDaemon(true);
-        watcher.start();
-    }
-
-    private synchronized void onProcessExited(int exitCode) {
-        JdtlsRecoveryAction action = JdtlsRecoveryClassifier.classifyProcessExited(exitCode);
-        if (action == JdtlsRecoveryAction.RESTART) {
-            submitRecoverySignal(action, "JDTLS process exited with code " + exitCode);
-        } else {
-            transitionTo(JdtlsClientState.FAILED, "JDTLS process exited", "exitCode=" + exitCode);
+        if (!recovery.isRecoveryInFlight() || recovery.getActiveRecoveryState() == null) {
+            transitionTo(JdtlsClientState.STARTING, "Starting", recovery.getLastRecoveryReason());
         }
     }
 
@@ -402,37 +275,44 @@ public class JdtlsClient implements AutoCloseable {
         if (initialized) {
             return;
         }
-        RuntimeSession current = requireSession();
+        JdtlsSessionManager.RuntimeSession current = sessions.requireSession();
 
         LOG.info("Sending initialize request to JDTLS...");
         InitializeParams params = new InitializeParams();
         params.setRootUri(workspaceRoot.toUri().toString());
         params.setCapabilities(createClientCapabilities());
+        params.setInitializationOptions(Map.of(
+            "extendedClientCapabilities", Map.of("classFileContentsSupport", true)
+        ));
         params.setProcessId((int) ProcessHandle.current().pid());
         params.setWorkspaceFolders(List.of(new WorkspaceFolder(
             workspaceRoot.toUri().toString(),
             workspaceRoot.getFileName().toString()
         )));
+        LOG.debug(
+            "Initialize params: rootUri={}, workspaceFolders={}",
+            params.getRootUri(), params.getWorkspaceFolders());
 
         try {
             InitializeResult result = current.languageServer().initialize(params)
                 .get(INIT_TIMEOUT_SECONDS, TimeUnit.SECONDS);
             current.languageServer().initialized(new InitializedParams());
             initialized = true;
-            transitionTo(JdtlsClientState.INDEXING,
+            transitionTo(
+                JdtlsClientState.INDEXING,
                 "Initializing workspace",
-                lastRecoveryReason);
+                recovery.getLastRecoveryReason());
 
             ServerCapabilities caps = result.getCapabilities();
             LOG.info("JDTLS initialized successfully!");
-            LOG.info("  - Workspace symbol provider: {}", caps.getWorkspaceSymbolProvider());
-            LOG.info("  - Definition provider: {}", caps.getDefinitionProvider());
-            LOG.info("  - References provider: {}", caps.getReferencesProvider());
+            LOG.debug("  - Workspace symbol provider: {}", caps.getWorkspaceSymbolProvider());
+            LOG.debug("  - Definition provider: {}", caps.getDefinitionProvider());
+            LOG.debug("  - References provider: {}", caps.getReferencesProvider());
         } catch (TimeoutException e) {
-            transitionTo(JdtlsClientState.FAILED, "JDTLS initialization timed out", e.getMessage());
+            transitionToIfOpen(JdtlsClientState.FAILED, "JDTLS initialization timed out", e.getMessage());
             throw e;
         } catch (ExecutionException e) {
-            transitionTo(JdtlsClientState.FAILED, "JDTLS initialization failed", e.getMessage());
+            transitionToIfOpen(JdtlsClientState.FAILED, "JDTLS initialization failed", e.getMessage());
             throw e;
         }
     }
@@ -456,7 +336,14 @@ public class JdtlsClient implements AutoCloseable {
         textDocument.setReferences(refCaps);
         DocumentSymbolCapabilities docSymbolCaps = new DocumentSymbolCapabilities();
         docSymbolCaps.setDynamicRegistration(true);
+        docSymbolCaps.setHierarchicalDocumentSymbolSupport(true);
         textDocument.setDocumentSymbol(docSymbolCaps);
+        TypeDefinitionCapabilities typeDefinitionCaps = new TypeDefinitionCapabilities();
+        typeDefinitionCaps.setDynamicRegistration(true);
+        textDocument.setTypeDefinition(typeDefinitionCaps);
+        TypeHierarchyCapabilities typeHierarchyCaps = new TypeHierarchyCapabilities();
+        typeHierarchyCaps.setDynamicRegistration(true);
+        textDocument.setTypeHierarchy(typeHierarchyCaps);
         capabilities.setTextDocument(textDocument);
 
         return capabilities;
@@ -466,7 +353,7 @@ public class JdtlsClient implements AutoCloseable {
         throws ExecutionException, InterruptedException, TimeoutException, IOException {
         return withDiagnosticsSummary(() -> withRuntimeRecovery(() -> {
             ensureAvailableForRequests();
-            RuntimeSession current = requireSession();
+            JdtlsSessionManager.RuntimeSession current = sessions.requireSession();
             WorkspaceSymbolParams params = new WorkspaceSymbolParams(query);
             var result = current.languageServer().getWorkspaceService().symbol(params)
                 .get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
@@ -498,7 +385,7 @@ public class JdtlsClient implements AutoCloseable {
         throws ExecutionException, InterruptedException, TimeoutException, IOException {
         return withDiagnosticsSummary(() -> withRuntimeRecovery(() -> {
             ensureAvailableForRequests();
-            RuntimeSession current = requireSession();
+            JdtlsSessionManager.RuntimeSession current = sessions.requireSession();
             ensureDocumentOpen(current, uri);
             ReferenceParams params = new ReferenceParams();
             params.setTextDocument(new TextDocumentIdentifier(uri));
@@ -515,7 +402,7 @@ public class JdtlsClient implements AutoCloseable {
         throws ExecutionException, InterruptedException, TimeoutException, IOException {
         return withDiagnosticsSummary(() -> withRuntimeRecovery(() -> {
             ensureAvailableForRequests();
-            RuntimeSession current = requireSession();
+            JdtlsSessionManager.RuntimeSession current = sessions.requireSession();
             ensureDocumentOpen(current, uri);
             DefinitionParams params = new DefinitionParams();
             params.setTextDocument(new TextDocumentIdentifier(uri));
@@ -539,7 +426,7 @@ public class JdtlsClient implements AutoCloseable {
         throws ExecutionException, InterruptedException, TimeoutException, IOException {
         return withDiagnosticsSummary(() -> withRuntimeRecovery(() -> {
             ensureAvailableForRequests();
-            RuntimeSession current = requireSession();
+            JdtlsSessionManager.RuntimeSession current = sessions.requireSession();
             ensureDocumentOpen(current, uri);
             ImplementationParams params = new ImplementationParams(
                 new TextDocumentIdentifier(uri),
@@ -548,7 +435,7 @@ public class JdtlsClient implements AutoCloseable {
             var result = current.languageServer().getTextDocumentService()
                 .implementation(params).get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
             if (result == null) {
-                return null;
+                return List.<Location>of();
             }
             return result.isLeft() ? result.getLeft() : List.<Location>of();
         }));
@@ -558,7 +445,7 @@ public class JdtlsClient implements AutoCloseable {
         throws ExecutionException, InterruptedException, TimeoutException, IOException {
         return withDiagnosticsSummary(() -> withRuntimeRecovery(() -> {
             ensureAvailableForRequests();
-            RuntimeSession current = requireSession();
+            JdtlsSessionManager.RuntimeSession current = sessions.requireSession();
             ensureDocumentOpen(current, uri);
             HoverParams params = new HoverParams(
                 new TextDocumentIdentifier(uri),
@@ -569,11 +456,11 @@ public class JdtlsClient implements AutoCloseable {
         }));
     }
 
-    public List<? extends Location> findIncomingCalls(String uri, int line, int character)
+    public List<CallHierarchyIncomingCall> findIncomingCalls(String uri, int line, int character)
         throws ExecutionException, InterruptedException, TimeoutException, IOException {
         return withDiagnosticsSummary(() -> withRuntimeRecovery(() -> {
             ensureAvailableForRequests();
-            RuntimeSession current = requireSession();
+            JdtlsSessionManager.RuntimeSession current = sessions.requireSession();
             ensureDocumentOpen(current, uri);
             CallHierarchyPrepareParams prepareParams = new CallHierarchyPrepareParams(
                 new TextDocumentIdentifier(uri),
@@ -588,21 +475,15 @@ public class JdtlsClient implements AutoCloseable {
                 new CallHierarchyIncomingCallsParams(items.get(0));
             List<CallHierarchyIncomingCall> calls = current.languageServer().getTextDocumentService()
                 .callHierarchyIncomingCalls(incomingParams).get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
-            if (calls == null) {
-                return List.<Location>of();
-            }
-            return calls.stream()
-                .flatMap(call -> call.getFromRanges().stream()
-                    .map(range -> new Location(call.getFrom().getUri(), range)))
-                .toList();
+            return calls != null ? calls : List.of();
         }));
     }
 
-    public List<? extends Location> findOutgoingCalls(String uri, int line, int character)
+    public List<CallHierarchyOutgoingCall> findOutgoingCalls(String uri, int line, int character)
         throws ExecutionException, InterruptedException, TimeoutException, IOException {
         return withDiagnosticsSummary(() -> withRuntimeRecovery(() -> {
             ensureAvailableForRequests();
-            RuntimeSession current = requireSession();
+            JdtlsSessionManager.RuntimeSession current = sessions.requireSession();
             ensureDocumentOpen(current, uri);
             CallHierarchyPrepareParams prepareParams = new CallHierarchyPrepareParams(
                 new TextDocumentIdentifier(uri),
@@ -617,12 +498,7 @@ public class JdtlsClient implements AutoCloseable {
                 new CallHierarchyOutgoingCallsParams(items.get(0));
             List<CallHierarchyOutgoingCall> calls = current.languageServer().getTextDocumentService()
                 .callHierarchyOutgoingCalls(outgoingParams).get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
-            if (calls == null) {
-                return List.<Location>of();
-            }
-            return calls.stream()
-                .map(call -> new Location(call.getTo().getUri(), call.getTo().getSelectionRange()))
-                .toList();
+            return calls != null ? calls : List.of();
         }));
     }
 
@@ -630,7 +506,7 @@ public class JdtlsClient implements AutoCloseable {
         throws ExecutionException, InterruptedException, TimeoutException, IOException {
         return withDiagnosticsSummary(() -> withRuntimeRecovery(() -> {
             ensureAvailableForRequests();
-            RuntimeSession current = requireSession();
+            JdtlsSessionManager.RuntimeSession current = sessions.requireSession();
             DocumentSymbolParams params = new DocumentSymbolParams();
             params.setTextDocument(new TextDocumentIdentifier(uri));
             var result = current.languageServer().getTextDocumentService()
@@ -651,9 +527,34 @@ public class JdtlsClient implements AutoCloseable {
         throws ExecutionException, InterruptedException, TimeoutException, IOException {
         withDiagnosticsSummary(() -> withRuntimeRecovery(() -> {
             ensureAvailableForRequests();
-            ExecuteCommandParams params = new ExecuteCommandParams("java.buildWorkspace", List.of());
-            session.languageServer().getWorkspaceService()
-                .executeCommand(params).get(RuntimeConstants.BUILD_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            JdtlsSessionManager.RuntimeSession current = sessions.requireSession();
+            BuildWorkspaceStatus status = current.languageServer()
+                .buildWorkspace(Either.forLeft(true))
+                .get(RuntimeConstants.BUILD_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            if (status == BuildWorkspaceStatus.FAILED) {
+                throw new IOException("java/buildWorkspace returned FAILED");
+            }
+            if (status == BuildWorkspaceStatus.WITH_ERROR || status == BuildWorkspaceStatus.CANCELLED) {
+                LOG.warn("java/buildWorkspace returned {}", status);
+            }
+            return null;
+        }));
+    }
+
+    public void buildIncremental()
+        throws ExecutionException, InterruptedException, TimeoutException, IOException {
+        withDiagnosticsSummary(() -> withRuntimeRecovery(() -> {
+            ensureAvailableForRequests();
+            JdtlsSessionManager.RuntimeSession current = sessions.requireSession();
+            BuildWorkspaceStatus status = current.languageServer()
+                .buildWorkspace(Either.forLeft(false))
+                .get(RuntimeConstants.BUILD_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            if (status == BuildWorkspaceStatus.FAILED) {
+                throw new IOException("java/buildWorkspace (incremental) returned FAILED");
+            }
+            if (status == BuildWorkspaceStatus.WITH_ERROR || status == BuildWorkspaceStatus.CANCELLED) {
+                LOG.warn("java/buildWorkspace (incremental) returned {}", status);
+            }
             return null;
         }));
     }
@@ -662,12 +563,106 @@ public class JdtlsClient implements AutoCloseable {
         throws ExecutionException, InterruptedException, TimeoutException, IOException {
         return withDiagnosticsSummary(() -> withRuntimeRecovery(() -> {
             ensureAvailableForRequests();
-            ExecuteCommandParams params = new ExecuteCommandParams(
+            JdtlsSessionManager.RuntimeSession current = sessions.requireSession();
+            return executeWorkspaceCommand(
+                current,
                 "java.project.resolveStackTraceLocation",
-                List.of(stackFrame)
+                List.of(stackFrame),
+                TIMEOUT_SECONDS);
+        }));
+    }
+
+    public String decompileClass(String classUri)
+        throws ExecutionException, InterruptedException, TimeoutException, IOException {
+        return withDiagnosticsSummary(() -> withRuntimeRecovery(() -> {
+            ensureAvailableForRequests();
+            JdtlsSessionManager.RuntimeSession current = sessions.requireSession();
+            Object result = executeWorkspaceCommand(current, "java.decompile", List.of(classUri), TIMEOUT_SECONDS);
+            return result != null ? result.toString() : "";
+        }));
+    }
+
+    public Object getProjects()
+        throws ExecutionException, InterruptedException, TimeoutException, IOException {
+        return withDiagnosticsSummary(() -> withRuntimeRecovery(() -> {
+            ensureAvailableForRequests();
+            JdtlsSessionManager.RuntimeSession current = sessions.requireSession();
+            return executeWorkspaceCommand(current, "java.project.getAll", List.of(), TIMEOUT_SECONDS);
+        }));
+    }
+
+    public Object getClasspath(String fileUri)
+        throws ExecutionException, InterruptedException, TimeoutException, IOException {
+        return withDiagnosticsSummary(() -> withRuntimeRecovery(() -> {
+            ensureAvailableForRequests();
+            JdtlsSessionManager.RuntimeSession current = sessions.requireSession();
+            return executeWorkspaceCommand(
+                current,
+                "java.project.getSettings",
+                List.of(
+                    fileUri, List.of(
+                        "org.eclipse.jdt.ls.core.sourcePaths",
+                        "org.eclipse.jdt.ls.core.referencedLibraries"
+                    )),
+                TIMEOUT_SECONDS
             );
-            return session.languageServer().getWorkspaceService()
-                .executeCommand(params).get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        }));
+    }
+
+    public List<? extends Location> getTypeDefinition(String uri, int line, int character)
+        throws ExecutionException, InterruptedException, TimeoutException, IOException {
+        return withDiagnosticsSummary(() -> withRuntimeRecovery(() -> {
+            ensureAvailableForRequests();
+            JdtlsSessionManager.RuntimeSession current = sessions.requireSession();
+            ensureDocumentOpen(current, uri);
+            TypeDefinitionParams params = new TypeDefinitionParams(
+                new TextDocumentIdentifier(uri),
+                new Position(line, character)
+            );
+            var result = current.languageServer().getTextDocumentService()
+                .typeDefinition(params).get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            if (result == null) {
+                return List.<Location>of();
+            }
+            if (result.isLeft()) {
+                return result.getLeft();
+            }
+            return result.getRight().stream()
+                .map(link -> new Location(link.getTargetUri(), link.getTargetRange()))
+                .toList();
+        }));
+    }
+
+    public TypeHierarchyData getTypeHierarchy(String uri, int line, int character)
+        throws ExecutionException, InterruptedException, TimeoutException, IOException {
+        return withDiagnosticsSummary(() -> withRuntimeRecovery(() -> {
+            ensureAvailableForRequests();
+            JdtlsSessionManager.RuntimeSession current = sessions.requireSession();
+            ensureDocumentOpen(current, uri);
+
+            TypeHierarchyPrepareParams prepareParams = new TypeHierarchyPrepareParams(
+                new TextDocumentIdentifier(uri),
+                new Position(line, character)
+            );
+            List<TypeHierarchyItem> items = current.languageServer().getTextDocumentService()
+                .prepareTypeHierarchy(prepareParams).get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            if (items == null || items.isEmpty()) {
+                return null;
+            }
+
+            TypeHierarchyItem item = items.get(0);
+            List<TypeHierarchyItem> supertypes = current.languageServer().getTextDocumentService()
+                .typeHierarchySupertypes(new TypeHierarchySupertypesParams(item))
+                .get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            List<TypeHierarchyItem> subtypes = current.languageServer().getTextDocumentService()
+                .typeHierarchySubtypes(new TypeHierarchySubtypesParams(item))
+                .get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+
+            return new TypeHierarchyData(
+                item,
+                supertypes != null ? supertypes : List.of(),
+                subtypes != null ? subtypes : List.of()
+            );
         }));
     }
 
@@ -680,12 +675,13 @@ public class JdtlsClient implements AutoCloseable {
         return ds;
     }
 
-    private void ensureDocumentOpen(RuntimeSession current, String uri) throws IOException {
+    private void ensureDocumentOpen(JdtlsSessionManager.RuntimeSession current, String uri) throws IOException {
         if (current.openedDocuments().add(uri)) {
             try {
                 Path filePath = Path.of(URI.create(uri));
                 String content = Files.readString(filePath);
                 TextDocumentItem item = new TextDocumentItem(uri, "java", 1, content);
+                LOG.debug("Sending didOpen: uri={}, bytes={}", uri, content.length());
                 current.languageServer().getTextDocumentService().didOpen(new DidOpenTextDocumentParams(item));
             } catch (Exception e) {
                 current.openedDocuments().remove(uri);
@@ -694,14 +690,32 @@ public class JdtlsClient implements AutoCloseable {
         }
     }
 
+    private Object executeWorkspaceCommand(
+        JdtlsSessionManager.RuntimeSession current, String command,
+        List<Object> arguments, long timeoutSeconds)
+        throws ExecutionException, InterruptedException, TimeoutException {
+        ExecuteCommandParams params = new ExecuteCommandParams(command, arguments);
+        LOG.debug("Executing JDTLS workspace command: {} args={}", command, LspSummarizer.commandArguments(arguments));
+        Object result = current.languageServer().getWorkspaceService()
+            .executeCommand(params).get(timeoutSeconds, TimeUnit.SECONDS);
+        LOG.debug("JDTLS workspace command result: {} -> {}", command, LspSummarizer.commandValue(result));
+        return result;
+    }
+
     private void ensureAvailableForRequests() {
-        if (state == JdtlsClientState.RECOVERING_RESTART || state == JdtlsClientState.RECOVERING_REINDEX) {
-            throw new IllegalStateException("JDTLS is in status=" + state.name().toLowerCase()
-                + ". Check indexing_status and retry after recovery completes.");
+        JdtlsClientState currentState = recovery.getState();
+        if (currentState == JdtlsClientState.STARTING) {
+            throw new IllegalStateException(
+                "JDTLS is still initializing. Check indexing_status.");
         }
-        if (state == JdtlsClientState.DEGRADED || state == JdtlsClientState.FAILED) {
-            throw new IllegalStateException("JDTLS is in status=" + state.name().toLowerCase()
-                + ". Use restart_jdtls or reindex_workspace after checking indexing_status.");
+        if (currentState == JdtlsClientState.RECOVERING_RESTART
+            || currentState == JdtlsClientState.RECOVERING_REINDEX) {
+            throw new IllegalStateException("JDTLS is in status=" + currentState.name().toLowerCase()
+                                            + ". Check indexing_status and retry after recovery completes.");
+        }
+        if (currentState == JdtlsClientState.DEGRADED || currentState == JdtlsClientState.FAILED) {
+            throw new IllegalStateException("JDTLS is in status=" + currentState.name().toLowerCase()
+                                            + ". Use restart_jdtls or reindex_workspace after checking indexing_status.");
         }
         if (!initialized) {
             throw new IllegalStateException("JDTLS client not initialized. Call initialize() first.");
@@ -717,15 +731,15 @@ public class JdtlsClient implements AutoCloseable {
             return call.call();
         } catch (IllegalStateException ex) {
             if (looksLikeDeadProcessOrUninitializedRuntime(ex)) {
-                handleRecoverySignal(JdtlsRecoveryAction.RESTART, ex.getMessage());
+                recovery.handleSignal(JdtlsRecoveryAction.RESTART, ex.getMessage());
             }
             throw ex;
         } catch (ExecutionException | TimeoutException | IOException ex) {
-            handleRecoverySignal(JdtlsRecoveryClassifier.classifyThrowable(ex), ex.getMessage());
+            recovery.handleSignal(JdtlsRecoveryClassifier.classifyThrowable(ex), ex.getMessage());
             throw ex;
         } catch (InterruptedException ex) {
             Thread.currentThread().interrupt();
-            handleRecoverySignal(JdtlsRecoveryClassifier.classifyThrowable(ex), ex.getMessage());
+            recovery.handleSignal(JdtlsRecoveryClassifier.classifyThrowable(ex), ex.getMessage());
             throw ex;
         } catch (RuntimeException ex) {
             throw ex;
@@ -774,32 +788,53 @@ public class JdtlsClient implements AutoCloseable {
     }
 
     public String restartJdtls() throws Exception {
-        if (!beginRecovery(JdtlsRecoveryAction.RESTART, "manual restart requested")) {
-            return "status=" + state.name().toLowerCase() + "; message=recovery already in progress";
+        if (!recovery.beginRecovery(JdtlsRecoveryAction.RESTART, "manual restart requested")) {
+            return "status=" + recovery.getState().name().toLowerCase() + "; message=recovery already in progress";
         }
         try {
             return restartInternal(false, "manual restart requested", true);
         } finally {
-            finishRecovery();
+            recovery.finishRecovery();
         }
     }
 
     public String reindexWorkspace() throws Exception {
-        if (!beginRecovery(JdtlsRecoveryAction.REINDEX, "manual reindex requested")) {
-            return "status=" + state.name().toLowerCase() + "; message=recovery already in progress";
+        if (!recovery.beginRecovery(JdtlsRecoveryAction.REINDEX, "manual reindex requested")) {
+            return "status=" + recovery.getState().name().toLowerCase() + "; message=recovery already in progress";
         }
         try {
-            return restartInternal(true, "manual reindex requested", true);
+            if (closed) {
+                return getIndexingStatus();
+            }
+            JdtlsSessionManager.RuntimeSession current = sessions.requireSession();
+            BuildWorkspaceStatus status = current.languageServer()
+                .buildWorkspace(Either.forLeft(true))
+                .get(RuntimeConstants.BUILD_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            if (status == BuildWorkspaceStatus.FAILED) {
+                throw new IOException("java/buildWorkspace CLEAN+FULL returned FAILED");
+            }
+            if (status == BuildWorkspaceStatus.WITH_ERROR || status == BuildWorkspaceStatus.CANCELLED) {
+                LOG.warn("reindexWorkspace: java/buildWorkspace returned {}", status);
+            }
+            // buildWorkspace runs on an already-initialized JDTLS — no new ServiceReady arrives.
+            // Transition to READY directly so finishRecovery() doesn't leave us stuck in INDEXING.
+            transitionToIfOpen(JdtlsClientState.READY, "Reindex complete", recovery.getLastRecoveryReason());
+        } catch (Exception ex) {
+            transitionTo(JdtlsClientState.FAILED, "JDTLS reindex failed", ex.getMessage());
+            throw ex;
         } finally {
-            finishRecovery();
+            recovery.finishRecovery();
         }
+        return getIndexingStatus();
     }
 
     private String restartInternal(boolean cleanDataDir, String reason, boolean manual) throws Exception {
         try {
-            diagnosticsCache.clear();
             closeCurrentSession();
-            abortIfClosed();
+            diagnosticsCache.clear();
+            if (closed) {
+                return getIndexingStatus();
+            }
             if (cleanDataDir) {
                 deleteDirectory(dataDir);
                 Files.createDirectories(dataDir);
@@ -807,131 +842,29 @@ public class JdtlsClient implements AutoCloseable {
             startSession();
             if (closed) {
                 closeCurrentSession();
-                abortIfClosed();
+                return getIndexingStatus();
             }
             initialize();
             if (closed) {
                 closeCurrentSession();
-                abortIfClosed();
+                return getIndexingStatus();
             }
             return getIndexingStatus();
         } catch (Exception ex) {
-            transitionTo(JdtlsClientState.FAILED,
+            transitionTo(
+                JdtlsClientState.FAILED,
                 manual ? "JDTLS recovery failed" : "Automatic recovery failed",
                 ex.getMessage());
             throw ex;
         }
     }
 
-    private void abortIfClosed() throws IOException {
-        if (closed) {
-            throw new IOException("JDTLS client is closed");
-        }
-    }
-
-    private boolean beginRecovery(JdtlsRecoveryAction action, String reason) {
-        synchronized (stateLock) {
-            if (closed || recoveryInFlight) {
-                return false;
-            }
-            recoveryInFlight = true;
-            activeRecoveryAction = action;
-            activeRecoveryState = action == JdtlsRecoveryAction.REINDEX
-                ? JdtlsClientState.RECOVERING_REINDEX
-                : JdtlsClientState.RECOVERING_RESTART;
-            state = activeRecoveryState;
-            stateMessage = reason;
-            lastRecoveryReason = reason != null ? reason : "";
-            return true;
-        }
-    }
-
-    private void finishRecovery() {
-        synchronized (stateLock) {
-            recoveryInFlight = false;
-            activeRecoveryAction = JdtlsRecoveryAction.NONE;
-            activeRecoveryState = null;
-            if (!closed
-                    && initialized
-                    && (state == JdtlsClientState.RECOVERING_RESTART || state == JdtlsClientState.RECOVERING_REINDEX)) {
-                state = JdtlsClientState.INDEXING;
-                if (stateMessage == null || stateMessage.isBlank()) {
-                    stateMessage = "Initializing workspace";
-                }
-            }
-        }
-    }
-
-    private void recordPendingRecoveryLocked(JdtlsRecoveryAction action, String reason) {
-        if (action.ordinal() > pendingRecoveryAction.ordinal()
-                && action.ordinal() > activeRecoveryAction.ordinal()) {
-            pendingRecoveryAction = action;
-            pendingRecoveryReason = reason;
-        }
-    }
-
-    private void schedulePendingRecoveryIfAny() {
-        JdtlsRecoveryAction action;
-        String reason;
-        synchronized (stateLock) {
-            if (closed || pendingRecoveryAction == JdtlsRecoveryAction.NONE || recoveryQueued || recoveryInFlight) {
-                return;
-            }
-            action = pendingRecoveryAction;
-            reason = pendingRecoveryReason;
-            pendingRecoveryAction = JdtlsRecoveryAction.NONE;
-            pendingRecoveryReason = "";
-            recoveryQueued = true;
-        }
-        try {
-            recoveryExecutor.submit(() -> {
-                recoveryQueued = false;
-                handleRecoverySignal(action, reason, true);
-            });
-        } catch (RejectedExecutionException ex) {
-            recoveryQueued = false;
-            LOG.debug("Skipping pending recovery submission after shutdown: {}", ex.getMessage());
-        }
-    }
-
     private void closeCurrentSession() {
-        RuntimeSession current = session;
-        if (current == null) {
-            return;
-        }
-        intentionallyClosingGenerations.add(current.generation());
-        try {
-            current.languageServer().shutdown().get(shutdownTimeoutMs, TimeUnit.MILLISECONDS);
-        } catch (Exception ignored) {
-        }
-        try {
-            current.languageServer().exit();
-        } catch (Exception ignored) {
-        }
-        long deadline = System.currentTimeMillis() + selfExitPollMs;
-        while (current.process().isAlive() && System.currentTimeMillis() < deadline) {
-            try {
-                Thread.sleep(50);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                break;
-            }
-        }
-        if (current.process().isAlive()) {
-            current.process().destroyForcibly();
-        }
-        current.stderrThread().interrupt();
-    }
-
-    private RuntimeSession requireSession() {
-        if (session == null) {
-            throw new IllegalStateException("JDTLS session is not available");
-        }
-        return session;
+        sessions.closeCurrentSession(shutdownTimeoutMs, selfExitPollMs);
     }
 
     public boolean isRunning() {
-        return session != null && session.process().isAlive();
+        return sessions.isRunning();
     }
 
     public JdtlsLanguageClient getLanguageClient() {
@@ -943,23 +876,35 @@ public class JdtlsClient implements AutoCloseable {
     }
 
     public String getIndexingStatus() {
-        return "status=" + state.name().toLowerCase()
-            + "; message=" + stateMessage
-            + languageClient.currentProgressSuffix()
-            + (lastRecoveryReason.isEmpty() ? "" : "; reason=" + lastRecoveryReason);
+        return "status=" + recovery.getState().name().toLowerCase()
+               + "; message=" + recovery.getStateMessage()
+               + languageClient.currentProgressSuffix()
+               + (recovery.getLastRecoveryReason().isEmpty() ? "" : "; reason=" + recovery.getLastRecoveryReason());
     }
 
     public static JdtlsClient createAndInitialize(Path workspaceRoot, String jdtlsCommand) throws Exception {
-        return createAndInitialize(workspaceRoot, jdtlsCommand, defaultRuntimeSessionFactory());
+        return createAndInitialize(workspaceRoot, jdtlsCommand, JdtlsSessionManager.defaultFactory());
     }
 
-    static JdtlsClient createAndInitialize(Path workspaceRoot, String jdtlsCommand, RuntimeSessionFactory factory) throws Exception {
+    public static JdtlsClient createAndInitialize(
+        Path workspaceRoot, String jdtlsCommand,
+        Optional<Path> lombokJar) throws Exception {
+        return createAndInitialize(
+            workspaceRoot, jdtlsCommand,
+            JdtlsSessionManager.defaultFactory(lombokJar));
+    }
+
+    static JdtlsClient createAndInitialize(
+        Path workspaceRoot, String jdtlsCommand,
+        JdtlsSessionManager.RuntimeSessionFactory factory) throws Exception {
         JdtlsClient client = new JdtlsClient(workspaceRoot, jdtlsCommand, factory, new DiagnosticsCache());
         try {
             client.initialize();
             return client;
         } catch (Exception firstFailure) {
-            LOG.warn("JDTLS initialization failed: {}. Cleaning data directory and retrying...", firstFailure.getMessage());
+            LOG.warn(
+                "JDTLS initialization failed: {}. Cleaning data directory and retrying...",
+                firstFailure.getMessage());
             client.close();
             deleteDirectory(client.dataDir);
             Files.createDirectories(client.dataDir);
@@ -967,6 +912,72 @@ public class JdtlsClient implements AutoCloseable {
         JdtlsClient retry = new JdtlsClient(workspaceRoot, jdtlsCommand, factory, new DiagnosticsCache());
         retry.initialize();
         return retry;
+    }
+
+    public static JdtlsClient createAndInitializeAsync(Path workspaceRoot, String jdtlsCommand)
+        throws IOException {
+        return createAndInitializeAsync(workspaceRoot, jdtlsCommand, JdtlsSessionManager.defaultFactory());
+    }
+
+    public static JdtlsClient createAndInitializeAsync(
+        Path workspaceRoot, String jdtlsCommand,
+        Optional<Path> lombokJar) throws IOException {
+        return createAndInitializeAsync(
+            workspaceRoot, jdtlsCommand,
+            JdtlsSessionManager.defaultFactory(lombokJar));
+    }
+
+    static JdtlsClient createAndInitializeAsync(
+        Path workspaceRoot, String jdtlsCommand,
+        JdtlsSessionManager.RuntimeSessionFactory factory) throws IOException {
+        JdtlsClient client = new JdtlsClient(
+            workspaceRoot,
+            jdtlsCommand,
+            factory,
+            new DiagnosticsCache()
+        );
+        Thread thread = new Thread(
+            () -> {
+                try {
+                    client.initialize();
+                } catch (Throwable firstEx) {
+                    if (firstEx instanceof InterruptedException) {
+                        Thread.currentThread().interrupt();
+                    }
+                    if (client.closed) {
+                        return;
+                    }
+                    LOG.warn(
+                        "Async JDTLS init failed (was: {}): {}. Cleaning data dir and retrying...",
+                        client.getIndexingStatus(),
+                        firstEx.getMessage()
+                    );
+                    try {
+                        client.restartInternal(true, "async init retry after first failure", true);
+                    } catch (Throwable retryEx) {
+                        if (retryEx instanceof InterruptedException) {
+                            Thread.currentThread().interrupt();
+                        }
+                        if (client.closed) {
+                            return;
+                        }
+                        LOG.warn(
+                            "Async JDTLS init retry also failed (was: {}): {}",
+                            client.getIndexingStatus(),
+                            retryEx.getMessage()
+                        );
+                        client.transitionToIfOpen(
+                            JdtlsClientState.FAILED,
+                            "Async initialization failed",
+                            retryEx.getMessage()
+                        );
+                    }
+                }
+            }, "jdtls-async-init");
+        thread.setDaemon(true);
+        client.asyncInitThread = thread;
+        thread.start();
+        return client;
     }
 
     private static void deleteDirectory(Path dir) {
@@ -985,55 +996,17 @@ public class JdtlsClient implements AutoCloseable {
         }
     }
 
-    Path dataDirForTests() {
-        return dataDir;
-    }
-
-    void forceStateForTests(JdtlsClientState state, String message, String reason) {
-        transitionTo(state, message, reason);
-    }
-
-    int recoveryActionExecutionCountForTests() {
-        return recoveryActionExecutionCount;
-    }
-
-    void setInitializedForTests(boolean initialized) {
-        this.initialized = initialized;
-    }
-
-    void setRunningForTests(boolean running) {
-        if (!running && session != null) {
-            intentionallyClosingGenerations.add(session.generation());
-            session.process().destroyForcibly();
-        }
-    }
-
-    void submitRecoverySignalForTests(JdtlsRecoveryAction action, String reason) {
-        submitRecoverySignal(action, reason);
-    }
-
-    Future<String> startManualRecoveryInBackgroundForTests(boolean reindex) {
-        return CompletableFuture.supplyAsync(() -> {
-            try {
-                return reindex ? reindexWorkspace() : restartJdtls();
-            } catch (Exception e) {
-                throw new CompletionException(e);
-            }
-        });
-    }
-
-    void awaitRecoveryTasksForTests() throws Exception {
-        recoveryExecutor.submit(() -> {
-        }).get(1, TimeUnit.SECONDS);
-    }
-
     @Override
-    public synchronized void close() {
+    public void close() {
         closed = true;
+        Thread asyncThread = asyncInitThread;
+        if (asyncThread != null) {
+            asyncThread.interrupt();
+        }
         diagnosticsSummaryExecutor.shutdownNow();
-        recoveryExecutor.shutdownNow();
+        recovery.shutdown();
         closeCurrentSession();
-        transitionTo(JdtlsClientState.FAILED, "Closed", lastRecoveryReason);
-        session = null;
+        recovery.transitionTo(JdtlsClientState.FAILED, "Closed", recovery.getLastRecoveryReason());
+        sessions.clearSession();
     }
 }
