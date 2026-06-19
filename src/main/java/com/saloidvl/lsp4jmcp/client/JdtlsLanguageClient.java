@@ -207,12 +207,7 @@ public class JdtlsLanguageClient implements LanguageClient {
 
     @Override
     public void showMessage(MessageParams messageParams) {
-        switch (messageParams.getType()) {
-            case Error -> LOG.error("JDTLS: {}", messageParams.getMessage());
-            case Warning -> LOG.warn("JDTLS: {}", messageParams.getMessage());
-            case Info -> LOG.info("JDTLS: {}", messageParams.getMessage());
-            case Log -> LOG.debug("JDTLS: {}", messageParams.getMessage());
-        }
+        logByType(messageParams.getType(), messageParams.getMessage());
     }
 
     @Override
@@ -223,15 +218,18 @@ public class JdtlsLanguageClient implements LanguageClient {
 
     @Override
     public void logMessage(MessageParams message) {
-        if (message.getType() == MessageType.Error || message.getType() == MessageType.Warning) {
+        MessageType type = message.getType();
+        if (type == MessageType.Error || type == MessageType.Warning) {
             recoverySignalHandler.accept(message.getMessage());
         }
-        switch (message.getType()) {
-            case Error -> LOG.error("JDTLS: {}", message.getMessage());
-            case Warning -> LOG.warn("JDTLS: {}", message.getMessage());
-            case Info -> LOG.info("JDTLS: {}", message.getMessage());
-            case Log -> LOG.debug("JDTLS: {}", message.getMessage());
-        }
+        logByType(type, message.getMessage());
+    }
+
+    private void logByType(MessageType type, String msg) {
+        if (type == MessageType.Error) LOG.error("JDTLS: {}", msg);
+        else if (type == MessageType.Warning) LOG.warn("JDTLS: {}", msg);
+        else if (type == MessageType.Info) LOG.info("JDTLS: {}", msg);
+        else LOG.debug("JDTLS: {}", msg);
     }
 
     /**
