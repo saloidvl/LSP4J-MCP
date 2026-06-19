@@ -36,6 +36,7 @@ out/
 # Eclipse
 .classpath
 .project
+.factorypath
 .settings/
 
 # VS Code
@@ -48,5 +49,5 @@ out/
 .mcp.json
 mcp-config.json
 
-# Claude
 .claude/
+/logs/

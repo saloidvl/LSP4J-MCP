@@ -58,6 +58,8 @@ class McpToolsIT {
         Path logPath = Path.of(System.getProperty("user.dir")).resolve("logs/test-integration.log").toAbsolutePath();
         isolatedSocketDir = Files.createTempDirectory(Path.of("/tmp"), "mcp-it-");
         cleanFixtureArtifacts(fixturePath);
+        Path mainProjectDir = Path.of(System.getProperty("user.dir")).toAbsolutePath();
+        ensureLombokJar(mainProjectDir);
 
         String jdtlsPath = System.getenv("JDTLS_PATH");
         buildDir = Files.createTempDirectory("lsp4j-mcp-build-");
@@ -89,6 +91,7 @@ class McpToolsIT {
         assertThat(tools.tools()).hasSize(20);
 
         pollUntilReady(INDEXING_TIMEOUT);
+        callTool("refresh_diagnostics", Map.of());
     }
 
     @AfterAll
@@ -263,11 +266,11 @@ class McpToolsIT {
     }
 
     @Test
-    void getHover_returnsTypeInfoForGreetParam() throws Exception {
+    void getHover_returnsInfoForBuildMessageCall() throws Exception {
         String expected = getFromFile("integration/get_hover_greet_param.json");
         String actual = callTool(
             "get_hover", Map.of(
-                "file", fixtureFile("GreeterImpl.java"), "line", 6, "character", 27));
+                "file", fixtureFile("GreeterImpl.java"), "line", 7, "character", 30));
 
         JSONAssert.assertEquals(expected, actual, JSONCompareMode.NON_EXTENSIBLE);
     }
@@ -407,6 +410,18 @@ class McpToolsIT {
         synchronized (serverErrors) {
             return serverErrors.toString();
         }
+    }
+
+    private static void ensureLombokJar(Path projectDir) throws IOException, InterruptedException {
+        // Download lombok.jar to ~/.m2 so LombokSupport.findJar() can locate it.
+        // Uses dependency:get from the main project dir to avoid creating Eclipse project files
+        // in the fixture workspace (which would change how JDTLS analyzes it).
+        Process process = new ProcessBuilder(
+            "mvn", "dependency:get", "-Dartifact=org.projectlombok:lombok:1.18.46:jar", "-q"
+        ).directory(projectDir.toFile())
+         .redirectErrorStream(true)
+         .start();
+        process.waitFor();
     }
 
     private static Path buildJar(Path buildDir) throws IOException, InterruptedException {
