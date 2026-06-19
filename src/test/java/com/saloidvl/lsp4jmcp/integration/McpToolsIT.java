@@ -175,10 +175,7 @@ class McpToolsIT {
             "get_type_definition", Map.of(
                 "file", fixtureFile("App.java"), "line", 6, "character", 17));
 
-        JSONAssert.assertEquals(
-            normalizeFixturePaths(expected),
-            normalizeFixturePaths(actual),
-            JSONCompareMode.NON_EXTENSIBLE);
+        JSONAssert.assertEquals(expected, actual, JSONCompareMode.NON_EXTENSIBLE);
     }
 
     @Test
@@ -214,10 +211,7 @@ class McpToolsIT {
             "get_type_hierarchy", Map.of(
                 "file", fixtureFile("Greeter.java"), "line", 4, "character", 18));
 
-        JSONAssert.assertEquals(
-            normalizeFixturePaths(expected),
-            normalizeFixturePaths(actual),
-            JSONCompareMode.NON_EXTENSIBLE);
+        JSONAssert.assertEquals(expected, actual, JSONCompareMode.NON_EXTENSIBLE);
     }
 
     @Test
@@ -287,7 +281,7 @@ class McpToolsIT {
                 "line", 6,
                 "symbol", "greet"
             ));
-        JSONAssert.assertEquals(expected, normalizeFixturePaths(actual), JSONCompareMode.NON_EXTENSIBLE);
+        JSONAssert.assertEquals(expected, actual, JSONCompareMode.NON_EXTENSIBLE);
     }
 
     @Test
@@ -295,10 +289,7 @@ class McpToolsIT {
         String expected = getFromFile("integration/get_projects.json");
         String actual = callTool("get_projects", Map.of());
 
-        JSONAssert.assertEquals(
-            normalizeFixturePaths(expected),
-            normalizeFixturePaths(actual),
-            JSONCompareMode.NON_EXTENSIBLE);
+        JSONAssert.assertEquals(expected, actual, JSONCompareMode.NON_EXTENSIBLE);
     }
 
     @Test
@@ -306,10 +297,7 @@ class McpToolsIT {
         String expected = getFromFile("integration/get_classpath.json");
         String actual = callTool("get_classpath", Map.of("file", fixtureFile("App.java")));
 
-        JSONAssert.assertEquals(
-            normalizeFixturePaths(expected),
-            normalizeFixturePaths(actual),
-            JSONCompareMode.NON_EXTENSIBLE);
+        JSONAssert.assertEquals(expected, actual, JSONCompareMode.NON_EXTENSIBLE);
     }
 
     @Test
@@ -382,19 +370,12 @@ class McpToolsIT {
             .findFirst().orElse("");
     }
 
-    private String normalizeFixturePaths(String json) {
-        String fp = fixturePath.toString();
-        return json
-            .replace("file://" + fp, "file://$FIXTURE")
-            .replace("file:" + fp, "file:$FIXTURE")
-            .replace(fp, "$FIXTURE");
-    }
-
     private String getFromFile(String path) throws IOException {
         try (InputStream is = getClass().getClassLoader().getResourceAsStream(path)) {
             if (is == null)
                 throw new IOException("Resource not found: " + path);
-            return new String(is.readAllBytes(), StandardCharsets.UTF_8);
+            String content = new String(is.readAllBytes(), StandardCharsets.UTF_8);
+            return content.replace("$FIXTURE", fixturePath.toString());
         }
     }
 

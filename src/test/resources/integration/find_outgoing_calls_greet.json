@@ -5,7 +5,7 @@
     {
       "name": "buildMessage(String) : String",
       "container": "com.example.sample.MessageHelper",
-      "file": "/Users/vladimirsaloid/work/LSP4J-MCP/src/it/fixtures/java-sample/src/main/java/com/example/sample/GreeterImpl.java",
+      "file": "$FIXTURE/src/main/java/com/example/sample/GreeterImpl.java",
       "startLine": 7,
       "startColumn": 16,
       "endLine": 7,
