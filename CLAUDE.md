@@ -18,21 +18,16 @@ mvn test
 # Run a single test class
 mvn test -Dtest=JavaToolsTest
 
-# Publish a tracked repository artifact into dist/
-./scripts/bump-and-publish.sh <new-version>
-
-# Run the launcher with the tracked artifact
-./run.sh /path/to/java/project
-
-# Or invoke the tracked jar directly
-java -jar dist/lsp4j-mcp-<version>.jar <workspace-path> jdtls
+# Release: bump version in pom.xml, commit, tag vX.Y.Z, push tag — CI builds and publishes JAR to GitHub Releases
+mvn versions:set -DnewVersion=<new-version> -DgenerateBackupPoms=false
+git add pom.xml && git commit -m "Release v<new-version>"
+git tag -a v<new-version> -m "Release v<new-version>"
+git push origin HEAD && git push origin v<new-version>
 ```
 
 ## Artifact Layout
 
 - `target/` contains normal Maven build output
-- `dist/` contains versioned JARs intentionally tracked in git
-- `scripts/bump-and-publish.sh` updates `pom.xml`, builds the project, copies the shaded JAR into `dist/`, and fails if the requested version already exists
 
 ## Architecture
 

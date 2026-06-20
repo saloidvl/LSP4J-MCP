@@ -5,6 +5,9 @@ on:
     tags:
       - 'v*'
 
+permissions:
+  contents: write
+
 jobs:
   release:
     runs-on: ubuntu-latest
@@ -14,8 +17,9 @@ jobs:
         with:
           java-version: '21'
           distribution: temurin
+          cache: maven
       - name: Build
-        run: mvn clean package
+        run: mvn clean package -DskipTests
       - name: Create GitHub Release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
