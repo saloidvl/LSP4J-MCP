@@ -2,7 +2,7 @@
 
 An MCP server that gives AI agents IDE-grade Java navigation: go-to-definition, find references, call hierarchies, type hierarchies, diagnostics, hover docs, and more — powered by the same language server that drives Eclipse and VS Code. Instead of grep-and-guess, the agent navigates code the same way a developer does in an IDE.
 
-> Forked from [devoxx/lsp4j-mcp](https://github.com/devoxx/lsp4j-mcp) with a rewritten runtime model, automatic JDTLS recovery, Lombok support, and 14 additional tools. [See what changed.](#changes-from-upstream)
+> Forked from [stephanj/LSP4J-MCP](https://github.com/stephanj/LSP4J-MCP) with a rewritten runtime model, automatic JDTLS recovery, Lombok support, and 14 additional tools. [See what changed.](#changes-from-upstream)
 
 ---
 
