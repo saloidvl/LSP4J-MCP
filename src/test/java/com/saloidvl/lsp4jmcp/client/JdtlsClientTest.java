@@ -1,5 +1,9 @@
 package com.saloidvl.lsp4jmcp.client;
 
+import com.google.gson.Gson;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
+import com.saloidvl.lsp4jmcp.config.JdtlsSettingsSnapshot;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -16,7 +20,9 @@ import java.util.concurrent.atomic.AtomicInteger;
 import org.eclipse.lsp4j.CallHierarchyIncomingCall;
 import org.eclipse.lsp4j.CallHierarchyItem;
 import org.eclipse.lsp4j.CallHierarchyOutgoingCall;
+import org.eclipse.lsp4j.DidChangeConfigurationParams;
 import org.eclipse.lsp4j.InitializeResult;
+import org.eclipse.lsp4j.InitializedParams;
 import org.eclipse.lsp4j.Location;
 import org.eclipse.lsp4j.LocationLink;
 import org.eclipse.lsp4j.ServerCapabilities;
@@ -34,6 +40,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -362,6 +369,42 @@ class JdtlsClientTest {
     }
 
     @Test
+    void initialize_sendsSameSettingsInInitializeAndDidChangeConfiguration() throws Exception {
+        FakeRuntimeSessionFactory factory = new FakeRuntimeSessionFactory();
+        JdtlsSettingsSnapshot snapshot = settingsSnapshot();
+
+        JdtlsClient client = JdtlsClient.createAndInitialize(
+                tempDir, "/fake/jdtls", factory, snapshot);
+        FakeLanguageServer server = factory.currentLanguageServer;
+
+        JsonObject initializationOptions =
+                (JsonObject) server.lastInitializeParams.getInitializationOptions();
+        assertThat(initializationOptions.getAsJsonObject("settings"))
+                .isEqualTo(snapshot.settingsCopy());
+        assertThat(initializationOptions.getAsJsonObject("extendedClientCapabilities")
+                .get("classFileContentsSupport").getAsBoolean()).isTrue();
+        assertThat((JsonObject) server.lastConfigurationChange.getSettings())
+                .isEqualTo(snapshot.settingsCopy());
+        assertThat(server.lifecycleEvents)
+                .containsExactly("initialized", "didChangeConfiguration");
+        client.close();
+    }
+
+    @Test
+    void restart_reusesOriginalSettingsSnapshot() throws Exception {
+        FakeRuntimeSessionFactory factory = new FakeRuntimeSessionFactory();
+        JdtlsSettingsSnapshot snapshot = settingsSnapshot();
+        JdtlsClient client = JdtlsClient.createAndInitialize(
+                tempDir, "/fake/jdtls", factory, snapshot);
+
+        client.restartJdtls();
+
+        assertThat(factory.startedLanguageServers).hasSize(2);
+        assertInitializeSettings(factory.startedLanguageServers, snapshot);
+        client.close();
+    }
+
+    @Test
     void restartJdtls_restartsProcessWithoutDeletingDataDir() throws Exception {
         FakeRuntimeSessionFactory factory = new FakeRuntimeSessionFactory();
         JdtlsClient client = JdtlsClient.createAndInitialize(tempDir, "/fake/jdtls", factory);
@@ -376,41 +419,68 @@ class JdtlsClientTest {
     }
 
     @Test
-    void reindexWorkspace_callsCleanFullBuildWithoutRestartingProcess() throws Exception {
+    void reindexWorkspace_deletesDataDirAndRestartsProcessThenWaitsForReady() throws Exception {
         FakeRuntimeSessionFactory factory = new FakeRuntimeSessionFactory();
-        JdtlsClient client = JdtlsClient.createAndInitialize(tempDir, "/fake/jdtls", factory);
-
-        String result = client.reindexWorkspace();
-
-        assertThat(factory.currentLanguageServer.lastBuildWorkspaceArg).isEqualTo(Either.forLeft(true));
-        assertThat(factory.startCount.get()).isEqualTo(1); // no process restart
-        assertThat(result).contains("status=");
-        client.close();
-    }
-
-    @Test
-    void reindexWorkspace_doesNotDeleteDataDir() throws Exception {
-        FakeRuntimeSessionFactory factory = new FakeRuntimeSessionFactory();
-        JdtlsClient client = JdtlsClient.createAndInitialize(tempDir, "/fake/jdtls", factory);
+        JdtlsSettingsSnapshot snapshot = settingsSnapshot();
+        JdtlsClient client = JdtlsClient.createAndInitialize(
+                tempDir, "/fake/jdtls", factory, snapshot);
         Path dataDir = access(client).dataDirForTests();
         Path sentinel = dataDir.resolve("marker.txt");
         Files.writeString(sentinel, "stale");
 
-        client.reindexWorkspace();
+        Future<String> future = access(client).startManualRecoveryInBackgroundForTests(true);
+        factory.awaitStartCount(2, 2, TimeUnit.SECONDS);
+        markReady(client);
+        String result = future.get(2, TimeUnit.SECONDS);
 
-        assertThat(sentinel).exists();
+        assertThat(factory.startCount.get()).isEqualTo(2);
+        assertThat(sentinel).doesNotExist();
+        assertThat(result).contains("status=ready");
+        assertInitializeSettings(factory.startedLanguageServers, snapshot);
         client.close();
     }
 
     @Test
-    void reindexWorkspace_throwsIOExceptionWhenBuildReturnsFailed() throws Exception {
+    void reindexWorkspace_returnsDegradedWhenPostReimportBuildHasErrors() throws Exception {
         FakeRuntimeSessionFactory factory = new FakeRuntimeSessionFactory();
         JdtlsClient client = JdtlsClient.createAndInitialize(tempDir, "/fake/jdtls", factory);
+
+        Future<String> future = access(client).startManualRecoveryInBackgroundForTests(true);
+        factory.awaitStartCount(2, 2, TimeUnit.SECONDS);
+        factory.currentLanguageServer.setBuildWorkspaceResult(BuildWorkspaceStatus.WITH_ERROR);
+        markReady(client);
+        String result = future.get(2, TimeUnit.SECONDS);
+
+        assertThat(result).contains("status=degraded");
+        client.close();
+    }
+
+    @Test
+    void reindexWorkspace_throwsWhenPostReimportBuildReturnsFailed() throws Exception {
+        FakeRuntimeSessionFactory factory = new FakeRuntimeSessionFactory();
+        JdtlsClient client = JdtlsClient.createAndInitialize(tempDir, "/fake/jdtls", factory);
+
+        Future<String> future = access(client).startManualRecoveryInBackgroundForTests(true);
+        factory.awaitStartCount(2, 2, TimeUnit.SECONDS);
         factory.currentLanguageServer.setBuildWorkspaceResult(BuildWorkspaceStatus.FAILED);
+        markReady(client);
+
+        assertThatThrownBy(() -> future.get(2, TimeUnit.SECONDS))
+            .hasRootCauseMessage("java/buildWorkspace (incremental) returned FAILED");
+        assertThat(client.getIndexingStatus()).contains("status=failed");
+        client.close();
+    }
+
+    @Test
+    void reindexWorkspace_throwsWhenServiceReadyTimesOut() throws Exception {
+        FakeRuntimeSessionFactory factory = new FakeRuntimeSessionFactory();
+        JdtlsClient client = JdtlsClient.createAndInitialize(tempDir, "/fake/jdtls", factory);
+        client.reindexReadyTimeout = java.time.Duration.ofMillis(300);
 
         assertThatThrownBy(() -> client.reindexWorkspace())
-            .isInstanceOf(IOException.class)
-            .hasMessageContaining("FAILED");
+            .isInstanceOf(java.util.concurrent.TimeoutException.class)
+            .hasMessageContaining("Timed out waiting for JDTLS ServiceReady");
+        assertThat(client.getIndexingStatus()).contains("status=failed");
         client.close();
     }
 
@@ -418,10 +488,13 @@ class JdtlsClientTest {
     void createAndInitialize_retriesOnceAfterInitializationFailure() throws Exception {
         FakeRuntimeSessionFactory factory = new FakeRuntimeSessionFactory();
         factory.failFirstInitializeAttempt = true;
+        JdtlsSettingsSnapshot snapshot = settingsSnapshot();
 
-        JdtlsClient client = JdtlsClient.createAndInitialize(tempDir, "/fake/jdtls", factory);
+        JdtlsClient client = JdtlsClient.createAndInitialize(
+                tempDir, "/fake/jdtls", factory, snapshot);
 
         assertThat(factory.startCount.get()).isEqualTo(2);
+        assertInitializeSettings(factory.startedLanguageServers, snapshot);
         client.close();
     }
 
@@ -507,18 +580,18 @@ class JdtlsClientTest {
     }
 
     @Test
-    void recoveryStatus_staysRecoveringWhileReindexIsInProgress() throws Exception {
+    void reindexStatus_staysIndexingWhileWaitingForServiceReady() throws Exception {
         FakeRuntimeSessionFactory factory = new FakeRuntimeSessionFactory();
         JdtlsClient client = JdtlsClient.createAndInitialize(tempDir, "/fake/jdtls", factory);
-        factory.currentLanguageServer.blockBuildWorkspace();
 
         Future<String> recovery = access(client).startManualRecoveryInBackgroundForTests(true);
-        // give the background thread time to enter reindexWorkspace and call buildWorkspace
+        factory.awaitStartCount(2, 2, TimeUnit.SECONDS);
+        // give the background thread time to enter the ServiceReady wait loop
         Thread.sleep(100);
 
-        assertThat(client.getIndexingStatus()).contains("status=recovering_reindex");
+        assertThat(client.getIndexingStatus()).contains("status=indexing");
 
-        factory.currentLanguageServer.unblockBuildWorkspace();
+        markReady(client);
         assertThatCode(() -> recovery.get(2, TimeUnit.SECONDS)).doesNotThrowAnyException();
         client.close();
     }
@@ -560,30 +633,18 @@ class JdtlsClientTest {
     }
 
     @Test
-    void closeDuringReindex_recoveryCompletesAndProcessIsStopped() throws Exception {
+    void closeDuringReindex_recoveryCompletesPromptlyAndProcessIsStopped() throws Exception {
         FakeRuntimeSessionFactory factory = new FakeRuntimeSessionFactory();
         JdtlsClient client = JdtlsClient.createAndInitialize(tempDir, "/fake/jdtls", factory);
-        factory.currentLanguageServer.blockBuildWorkspace();
 
         Future<String> recovery = access(client).startManualRecoveryInBackgroundForTests(true);
+        factory.awaitStartCount(2, 2, TimeUnit.SECONDS);
         Thread.sleep(100);
 
         client.close();
-        factory.currentLanguageServer.unblockBuildWorkspace();
+
         assertThatCode(() -> recovery.get(2, TimeUnit.SECONDS)).doesNotThrowAnyException();
         assertThat(client.isRunning()).isFalse();
-    }
-
-    @Test
-    void completedRecovery_transitionsOutOfRecoveringStateWithoutStatusCallback() throws Exception {
-        FakeRuntimeSessionFactory factory = new FakeRuntimeSessionFactory();
-        JdtlsClient client = JdtlsClient.createAndInitialize(tempDir, "/fake/jdtls", factory);
-
-        String result = client.reindexWorkspace();
-
-        assertThat(result).contains("status=ready");
-        assertThat(client.getIndexingStatus()).contains("status=ready");
-        client.close();
     }
 
     @Test
@@ -861,6 +922,30 @@ class JdtlsClientTest {
     }
 
     @Test
+    void buildWorkspace_transitionsToDegradedWhenStatusIsWithError() throws Exception {
+        FakeRuntimeSessionFactory factory = new FakeRuntimeSessionFactory();
+        JdtlsClient client = JdtlsClient.createAndInitialize(tempDir, "/fake/jdtls", factory);
+        factory.currentLanguageServer.setBuildWorkspaceResult(BuildWorkspaceStatus.WITH_ERROR);
+
+        client.buildWorkspace();
+
+        assertThat(client.getIndexingStatus()).contains("status=degraded");
+        client.close();
+    }
+
+    @Test
+    void buildIncremental_transitionsToDegradedWhenStatusIsCancelled() throws Exception {
+        FakeRuntimeSessionFactory factory = new FakeRuntimeSessionFactory();
+        JdtlsClient client = JdtlsClient.createAndInitialize(tempDir, "/fake/jdtls", factory);
+        factory.currentLanguageServer.setBuildWorkspaceResult(BuildWorkspaceStatus.CANCELLED);
+
+        client.buildIncremental();
+
+        assertThat(client.getIndexingStatus()).contains("status=degraded");
+        client.close();
+    }
+
+    @Test
     void initialize_declaresTypeHierarchyAndTypeDefinitionCapabilities() throws Exception {
         FakeRuntimeSessionFactory factory = new FakeRuntimeSessionFactory();
         JdtlsClient client = JdtlsClient.createAndInitialize(tempDir, "/fake/jdtls", factory);
@@ -882,8 +967,33 @@ class JdtlsClientTest {
         return new JdtlsClientTestAccess(client);
     }
 
+    private void markReady(JdtlsClient client) {
+        JdtlsLanguageClient.StatusReport ready = new JdtlsLanguageClient.StatusReport();
+        ready.setType("ServiceReady");
+        ready.setMessage("Ready");
+        client.getLanguageClient().languageStatus(ready);
+    }
+
+    private static JdtlsSettingsSnapshot settingsSnapshot() {
+        JsonObject settings = JsonParser.parseString("""
+                {"java":{"import":{"gradle":{"annotationProcessing":{"enabled":false}}}}}
+                """).getAsJsonObject();
+        return JdtlsSettingsSnapshot.of(settings, "test-settings");
+    }
+
+    private static void assertInitializeSettings(
+            List<FakeLanguageServer> servers,
+            JdtlsSettingsSnapshot snapshot) {
+        assertThat(servers).allSatisfy(server -> {
+            JsonObject options = new Gson().toJsonTree(
+                    server.lastInitializeParams.getInitializationOptions()).getAsJsonObject();
+            assertThat(options.getAsJsonObject("settings")).isEqualTo(snapshot.settingsCopy());
+        });
+    }
+
     private static final class FakeRuntimeSessionFactory implements JdtlsSessionManager.RuntimeSessionFactory {
         private final AtomicInteger startCount = new AtomicInteger();
+        private final List<FakeLanguageServer> startedLanguageServers = new CopyOnWriteArrayList<>();
         private boolean failFirstInitializeAttempt;
         private boolean failAllInitializeAttempts;
         private volatile CountDownLatch initializeBlocker = new CountDownLatch(0);
@@ -907,6 +1017,7 @@ class JdtlsClientTest {
                 initializeAttemptLatch,
                 serverCapabilities);
             currentLanguageServer = server;
+            startedLanguageServers.add(server);
             return new JdtlsSessionManager.RuntimeSession(
                 generation,
                 process,
@@ -975,10 +1086,12 @@ class JdtlsClientTest {
         private final CountDownLatch initializeAttemptLatch;
         private final ServerCapabilities serverCapabilities;
         private final TextDocumentService textDocumentService = mock(TextDocumentService.class);
+        private final WorkspaceService workspaceService = mock(WorkspaceService.class);
+        private final List<String> lifecycleEvents = new CopyOnWriteArrayList<>();
         private volatile BuildWorkspaceStatus buildWorkspaceResult = BuildWorkspaceStatus.SUCCEED;
         private volatile org.eclipse.lsp4j.InitializeParams lastInitializeParams;
+        private volatile DidChangeConfigurationParams lastConfigurationChange;
         volatile Either<Boolean, boolean[]> lastBuildWorkspaceArg;
-        private volatile CountDownLatch buildWorkspaceBlocker = new CountDownLatch(0);
 
         private FakeLanguageServer(boolean failInitialize, FakeProcess process, CountDownLatch initializeBlocker,
                                    CountDownLatch initializeAttemptLatch, ServerCapabilities serverCapabilities) {
@@ -987,6 +1100,11 @@ class JdtlsClientTest {
             this.initializeBlocker = initializeBlocker;
             this.initializeAttemptLatch = initializeAttemptLatch;
             this.serverCapabilities = serverCapabilities;
+            doAnswer(invocation -> {
+                lastConfigurationChange = invocation.getArgument(0);
+                lifecycleEvents.add("didChangeConfiguration");
+                return null;
+            }).when(workspaceService).didChangeConfiguration(any());
         }
 
         @Override
@@ -1006,6 +1124,11 @@ class JdtlsClientTest {
             return CompletableFuture.completedFuture(result);
         }
 
+        @Override
+        public void initialized(InitializedParams params) {
+            lifecycleEvents.add("initialized");
+        }
+
         void setPrepareCallHierarchyResult(List<CallHierarchyItem> items) {
             when(textDocumentService.prepareCallHierarchy(any()))
                 .thenReturn(CompletableFuture.completedFuture(items));
@@ -1020,25 +1143,10 @@ class JdtlsClientTest {
             this.buildWorkspaceResult = result;
         }
 
-        void blockBuildWorkspace() {
-            buildWorkspaceBlocker = new CountDownLatch(1);
-        }
-
-        void unblockBuildWorkspace() {
-            buildWorkspaceBlocker.countDown();
-        }
-
         @Override
         public CompletableFuture<BuildWorkspaceStatus> buildWorkspace(Either<Boolean, boolean[]> forceReBuild) {
             lastBuildWorkspaceArg = forceReBuild;
-            return CompletableFuture.supplyAsync(() -> {
-                try {
-                    buildWorkspaceBlocker.await(5, TimeUnit.SECONDS);
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                }
-                return buildWorkspaceResult;
-            });
+            return CompletableFuture.supplyAsync(() -> buildWorkspaceResult);
         }
 
         @Override
@@ -1058,7 +1166,7 @@ class JdtlsClientTest {
 
         @Override
         public WorkspaceService getWorkspaceService() {
-            return mock(WorkspaceService.class);
+            return workspaceService;
         }
     }
 }

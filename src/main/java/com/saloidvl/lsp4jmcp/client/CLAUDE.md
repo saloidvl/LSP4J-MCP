@@ -25,8 +25,11 @@ createAndInitializeAsync(...) — non-blocking; initialize() runs on a daemon th
                                 (used by RepoWorkerMain — readiness reported via indexing_status)
 ```
 
-Constructor always starts a session immediately. `initialize()` sends the LSP `initialize` +
-`initialized` handshake.
+Constructor always starts a session immediately. Each client retains one immutable
+`JdtlsSettingsSnapshot`. `initialize()` includes its settings in `initializationOptions.settings`,
+sends the LSP `initialized` notification, and then sends the same settings through
+`workspace/didChangeConfiguration`. Internal initialization retry, restart, and reindex operations
+reuse the retained snapshot rather than re-reading environment variables or files.
 
 ## JDTLS State Machine
 
@@ -62,8 +65,27 @@ State lives in `JdtlsRecoveryManager`. `JdtlsClient` delegates all transitions v
 
 Both call `java/buildWorkspace` (JDTLS extension):
 
-- `buildWorkspace()` — passes `true` (CLEAN + FULL); used by `reindexWorkspace` MCP tool
-- `buildIncremental()` — passes `false` (incremental); used by `refresh_diagnostics` MCP tool
+- `buildWorkspace()` — passes `true` (CLEAN + FULL); not currently called by any MCP tool.
+- `buildIncremental()` — passes `false` (incremental); used by `refresh_diagnostics`, and also by
+  `reindexWorkspace()` as a post-reimport verification step (see below).
+
+Both transition the client to `DEGRADED` if JDTLS reports `WITH_ERROR`/`CANCELLED`, and throw
+`IOException` if it reports `FAILED`.
+
+## `reindexWorkspace()` — real clean reimport
+
+`reindex_workspace` deletes the data directory and restarts the JDTLS process (via the same
+`restartInternal(cleanDataDir=true, ...)` path used by the init-retry), then blocks — polling in
+200ms slices so a concurrent `close()` unblocks it promptly instead of waiting out the full
+timeout — until the new session reports `ServiceReady` (`RuntimeConstants.JDTLS_REINDEX_READY_TIMEOUT`,
+10 minutes) or the wait times out. Once ready, it runs `buildIncremental()` to verify the reimport
+actually produced a working classpath, so `indexing_status` reflects `degraded`/`failed` instead of
+falsely reporting `ready` when JDTLS silently failed to configure a project (e.g. Gradle/JVM
+incompatibility).
+
+`restart_jdtls` (soft restart, `cleanDataDir=false`) does **not** do this — it still returns as
+soon as the LSP `initialize` handshake completes, without waiting for readiness or verifying the
+build.
 
 ## Document Open Tracking
 

@@ -355,11 +355,11 @@ class McpToolsIT {
     @Test
     @Order(Integer.MAX_VALUE)
     void reindexWorkspace_completesAndBecomesReady() throws Exception {
-        // reindex_workspace now blocks until CLEAN+FULL build finishes (no process restart).
-        // Returns status=ready if ServiceReady notification was already processed,
-        // or status=indexing if it arrives slightly after the build response.
+        // reindex_workspace now blocks until JDTLS deletes the data dir, restarts, reports
+        // ServiceReady, and passes a post-reimport build verification — so it returns the final
+        // status directly instead of "indexing".
         String result = callTool("reindex_workspace", Map.of());
-        assertThat(result).containsAnyOf("status=ready", "status=indexing");
+        assertThat(result).contains("status=ready");
         pollUntilReady(INDEXING_TIMEOUT);
     }
 

@@ -9,13 +9,15 @@ import java.time.ZoneOffset;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class WorkerRegistryTest {
 
     @Test
     void acquireLease_existingReadyWorkerIncrementsLeaseCount() {
         WorkerRegistry registry = new WorkerRegistry(Clock.fixed(Instant.parse("2026-04-22T10:00:00Z"), ZoneOffset.UTC));
-        registry.registerReady("repo-1", Path.of("/tmp/repo"), "jdtls", null, 123L, "127.0.0.1", 51234);
+        registry.registerReady("repo-1", Path.of("/tmp/repo"), "jdtls", null,
+                123L, "127.0.0.1", 51234, "settings-abc");
 
         Object first = registry.acquireLease("repo-1");
         Object second = registry.acquireLease("repo-1");
@@ -29,7 +31,8 @@ class WorkerRegistryTest {
     @Test
     void releaseLease_lastLeaseMarksWorkerIdle() {
         WorkerRegistry registry = new WorkerRegistry(Clock.fixed(Instant.parse("2026-04-22T10:00:00Z"), ZoneOffset.UTC));
-        registry.registerReady("repo-1", Path.of("/tmp/repo"), "jdtls", null, 123L, "127.0.0.1", 51234);
+        registry.registerReady("repo-1", Path.of("/tmp/repo"), "jdtls", null,
+                123L, "127.0.0.1", 51234, "settings-abc");
 
         Object handle = registry.acquireLease("repo-1");
         registry.releaseLease(handle);
@@ -42,7 +45,8 @@ class WorkerRegistryTest {
     @Test
     void releaseLease_doubleReleaseIsIdempotent() {
         WorkerRegistry registry = new WorkerRegistry();
-        registry.registerReady("repo-1", Path.of("/tmp/repo"), "jdtls", null, 123L, "127.0.0.1", 51234);
+        registry.registerReady("repo-1", Path.of("/tmp/repo"), "jdtls", null,
+                123L, "127.0.0.1", 51234, "settings-abc");
 
         Object handle = registry.acquireLease("repo-1");
         assertThat(registry.releaseLease(handle)).isTrue();
@@ -53,7 +57,8 @@ class WorkerRegistryTest {
     void collectIdleWorkers_returnsWorkersPastIdleDelay() {
         Clock clock = Clock.fixed(Instant.parse("2026-04-22T10:00:00Z"), ZoneOffset.UTC);
         WorkerRegistry registry = new WorkerRegistry(clock);
-        registry.registerReady("repo-1", Path.of("/tmp/repo"), "jdtls", null, 123L, "127.0.0.1", 51234);
+        registry.registerReady("repo-1", Path.of("/tmp/repo"), "jdtls", null,
+                123L, "127.0.0.1", 51234, "settings-abc");
 
         Object handle = registry.acquireLease("repo-1");
         registry.releaseLease(handle);
@@ -67,7 +72,8 @@ class WorkerRegistryTest {
     @Test
     void acquireLease_cancelsScheduledIdleShutdown() {
         WorkerRegistry registry = new WorkerRegistry();
-        registry.registerReady("repo-1", Path.of("/tmp/repo"), "jdtls", null, 123L, "127.0.0.1", 51234);
+        registry.registerReady("repo-1", Path.of("/tmp/repo"), "jdtls", null,
+                123L, "127.0.0.1", 51234, "settings-abc");
 
         Object handle = registry.acquireLease("repo-1");
         registry.releaseLease(handle);
@@ -81,5 +87,41 @@ class WorkerRegistryTest {
         assertThat(record.leaseCount()).isEqualTo(1);
 
         registry.releaseLease(handle2);
+    }
+
+    @Test
+    void registerReady_storesLoadedSettingsFingerprint() {
+        WorkerRegistry registry = new WorkerRegistry();
+
+        WorkerRecord record = registry.registerReady(
+                "repo-1", Path.of("/tmp/repo"), "jdtls", null,
+                123L, "127.0.0.1", 51234, "settings-abc");
+
+        assertThat(record.settingsFingerprint()).isEqualTo("settings-abc");
+    }
+
+    @Test
+    void registerReady_rejectsNullSettingsFingerprint() {
+        assertInvalidFingerprint(null);
+    }
+
+    @Test
+    void registerReady_rejectsEmptySettingsFingerprint() {
+        assertInvalidFingerprint("");
+    }
+
+    @Test
+    void registerReady_rejectsBlankSettingsFingerprint() {
+        assertInvalidFingerprint("   ");
+    }
+
+    private static void assertInvalidFingerprint(String fingerprint) {
+        WorkerRegistry registry = new WorkerRegistry();
+
+        assertThatThrownBy(() -> registry.registerReady(
+                "repo-1", Path.of("/tmp/repo"), "jdtls", null,
+                123L, "127.0.0.1", 51234, fingerprint))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("settingsFingerprint");
     }
 }

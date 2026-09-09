@@ -1,6 +1,7 @@
 package com.saloidvl.lsp4jmcp.supervisor;
 
 import com.google.gson.Gson;
+import com.saloidvl.lsp4jmcp.config.JdtlsSettingsInputs;
 import com.saloidvl.lsp4jmcp.control.SupervisorCommand;
 import com.saloidvl.lsp4jmcp.control.SupervisorRequest;
 import com.saloidvl.lsp4jmcp.control.SupervisorResponse;
@@ -25,7 +26,10 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
 public interface SupervisorClient {
-    Lease openLease(Path workspacePath, String jdtlsCommand) throws Exception;
+    Lease openLease(
+            Path workspacePath,
+            String jdtlsCommand,
+            JdtlsSettingsInputs settingsInputs) throws Exception;
 
     interface Lease extends AutoCloseable {
         String host();
@@ -115,7 +119,10 @@ public interface SupervisorClient {
         }
 
         @Override
-        public Lease openLease(Path workspacePath, String jdtlsCommand) throws Exception {
+        public Lease openLease(
+                Path workspacePath,
+                String jdtlsCommand,
+                JdtlsSettingsInputs settingsInputs) throws Exception {
             RepoWorkspace workspace = RepoWorkspace.fromPath(workspacePath);
             SocketChannel channel = SocketChannel.open(StandardProtocolFamily.UNIX);
             try {
@@ -126,7 +133,8 @@ public interface SupervisorClient {
                     SupervisorCommand.OPEN_LEASE,
                     workspace.repoId(),
                     workspace.canonicalPath().toString(),
-                    jdtlsCommand
+                    jdtlsCommand,
+                    settingsInputs
                 )));
                 writer.newLine();
                 writer.flush();

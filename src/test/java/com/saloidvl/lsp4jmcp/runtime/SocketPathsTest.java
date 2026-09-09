@@ -18,11 +18,11 @@ class SocketPathsTest {
     }
 
     @Test
-    void supervisorSocketPath_filenameContainsVersion() {
+    void supervisorSocketPath_filenameContainsVersionAndControlProtocolRevision() {
         String filename = SocketPaths.supervisorSocketPath().getFileName().toString();
-        String version = BuildInfo.version();
 
-        assertThat(filename).isEqualTo("supervisor-" + version + ".sock");
+        assertThat(filename).isEqualTo(
+                "supervisor-" + BuildInfo.version() + "-p2.sock");
     }
 
     @Test

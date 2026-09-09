@@ -31,7 +31,37 @@ public final class WorkerRegistry {
             Process process,
             long workerPid,
             String host,
-            int port) {
+            int port,
+            String settingsFingerprint) {
+        return register(
+                repoId, workspacePath, jdtlsCommand, process, workerPid, host, port,
+                settingsFingerprint, WorkerState.READY);
+    }
+
+    public synchronized WorkerRecord registerStopping(
+            String repoId,
+            Path workspacePath,
+            String jdtlsCommand,
+            Process process,
+            long workerPid,
+            String host,
+            int port,
+            String settingsFingerprint) {
+        return register(
+                repoId, workspacePath, jdtlsCommand, process, workerPid, host, port,
+                settingsFingerprint, WorkerState.STOPPING);
+    }
+
+    private WorkerRecord register(
+            String repoId,
+            Path workspacePath,
+            String jdtlsCommand,
+            Process process,
+            long workerPid,
+            String host,
+            int port,
+            String settingsFingerprint,
+            WorkerState state) {
         WorkerRecord record = new WorkerRecord(
             repoId,
             workspacePath,
@@ -40,7 +70,8 @@ public final class WorkerRegistry {
             workerPid,
             host,
             port,
-            WorkerState.READY
+            settingsFingerprint,
+            state
         );
         workersByRepoId.put(repoId, record);
         return record;
@@ -80,7 +111,8 @@ public final class WorkerRegistry {
     public synchronized List<WorkerRecord> collectIdleWorkers(Instant now) {
         List<WorkerRecord> idleWorkers = new ArrayList<>();
         for (WorkerRecord record : workersByRepoId.values()) {
-            if (record.leaseCount() == 0
+            if (record.state() == WorkerState.READY
+                    && record.leaseCount() == 0
                     && record.lastLeaseReleasedAt() != null
                     && !record.lastLeaseReleasedAt().plus(RuntimeConstants.WORKER_IDLE_SHUTDOWN_DELAY).isAfter(now)) {
                 idleWorkers.add(record);

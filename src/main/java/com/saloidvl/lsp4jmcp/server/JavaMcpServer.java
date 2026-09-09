@@ -82,7 +82,19 @@ public final class JavaMcpServer {
             .toolCall(
                 Tool.builder()
                     .name("find_references")
-                    .description("Find all references to a symbol at a given file location")
+                    .description("""
+                    Find all references to a symbol at a given file location.
+
+                    LIMITATION: for a Lombok-generated accessor (e.g. `obj.getFoo()`), JDT's search index \
+                    doesn't see the synthetic method, so this returns only the call site itself (count=1) \
+                    instead of all usages.
+
+                    To detect and work around this: call find_definition on the accessor call site first. \
+                    If it resolves to a FIELD declaration whose name is the accessor name with its get/is/set/with \
+                    prefix stripped and decapitalized (e.g. `getFoo` -> `foo`), it's a Lombok-generated accessor \
+                    — call find_references again on that field's location instead; JDT aggregates both direct \
+                    field access and all accessor call sites when queried from the field.
+                    """)
                     .inputSchema(objectMapper.readValue("""
                     {
                       "type": "object",
