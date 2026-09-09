@@ -1,5 +1,8 @@
 package com.saloidvl.lsp4jmcp.client;
 
+import com.google.gson.JsonObject;
+import com.saloidvl.lsp4jmcp.config.JdtlsSettingsLoader;
+import com.saloidvl.lsp4jmcp.config.JdtlsSettingsSnapshot;
 import com.saloidvl.lsp4jmcp.runtime.RuntimeConstants;
 import java.io.IOException;
 import java.net.URI;
@@ -7,9 +10,10 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.time.Duration;
 import java.util.Comparator;
 import java.util.List;
-import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutionException;
@@ -26,6 +30,7 @@ import org.eclipse.lsp4j.CallHierarchyPrepareParams;
 import org.eclipse.lsp4j.ClientCapabilities;
 import org.eclipse.lsp4j.DefinitionCapabilities;
 import org.eclipse.lsp4j.DefinitionParams;
+import org.eclipse.lsp4j.DidChangeConfigurationParams;
 import org.eclipse.lsp4j.DidOpenTextDocumentParams;
 import org.eclipse.lsp4j.DocumentSymbol;
 import org.eclipse.lsp4j.DocumentSymbolCapabilities;
@@ -95,6 +100,7 @@ public class JdtlsClient implements AutoCloseable {
     private final String jdtlsCommand;
     private final JdtlsLanguageClient languageClient;
     private final DiagnosticsCache diagnosticsCache;
+    private final JdtlsSettingsSnapshot settingsSnapshot;
     final JdtlsRecoveryManager recovery;
     private final JdtlsSessionManager sessions;
     private final ScheduledExecutorService diagnosticsSummaryExecutor =
@@ -110,22 +116,35 @@ public class JdtlsClient implements AutoCloseable {
 
     long shutdownTimeoutMs = RuntimeConstants.JDTLS_GRACEFUL_SHUTDOWN_TIMEOUT.toMillis();
     long selfExitPollMs = RuntimeConstants.JDTLS_SELF_EXIT_POLL_TIMEOUT.toMillis();
+    Duration reindexReadyTimeout = RuntimeConstants.JDTLS_REINDEX_READY_TIMEOUT;
 
     public JdtlsClient(Path workspaceRoot, String jdtlsCommand) throws IOException {
-        this(workspaceRoot, jdtlsCommand, JdtlsSessionManager.defaultFactory(), new DiagnosticsCache());
+        this(
+                workspaceRoot,
+                jdtlsCommand,
+                JdtlsSessionManager.defaultFactory(),
+                new DiagnosticsCache(),
+                defaultSettings());
     }
 
     public JdtlsClient(Path workspaceRoot, String jdtlsCommand, Optional<Path> lombokJar) throws IOException {
-        this(workspaceRoot, jdtlsCommand, JdtlsSessionManager.defaultFactory(lombokJar), new DiagnosticsCache());
+        this(
+                workspaceRoot,
+                jdtlsCommand,
+                JdtlsSessionManager.defaultFactory(lombokJar),
+                new DiagnosticsCache(),
+                defaultSettings());
     }
 
     private JdtlsClient(
         Path workspaceRoot, String jdtlsCommand,
         JdtlsSessionManager.RuntimeSessionFactory sessionFactory,
-        DiagnosticsCache diagnosticsCache) throws IOException {
+        DiagnosticsCache diagnosticsCache,
+        JdtlsSettingsSnapshot settingsSnapshot) throws IOException {
         this.workspaceRoot = workspaceRoot;
         this.jdtlsCommand = jdtlsCommand;
         this.diagnosticsCache = diagnosticsCache;
+        this.settingsSnapshot = Objects.requireNonNull(settingsSnapshot, "settingsSnapshot");
         this.languageClient = new JdtlsLanguageClient();
         this.languageClient.setDiagnosticsCache(diagnosticsCache);
         this.languageClient.setWorkspaceRoot(workspaceRoot);
@@ -281,9 +300,7 @@ public class JdtlsClient implements AutoCloseable {
         InitializeParams params = new InitializeParams();
         params.setRootUri(workspaceRoot.toUri().toString());
         params.setCapabilities(createClientCapabilities());
-        params.setInitializationOptions(Map.of(
-            "extendedClientCapabilities", Map.of("classFileContentsSupport", true)
-        ));
+        params.setInitializationOptions(createInitializationOptions());
         params.setProcessId((int) ProcessHandle.current().pid());
         params.setWorkspaceFolders(List.of(new WorkspaceFolder(
             workspaceRoot.toUri().toString(),
@@ -297,6 +314,9 @@ public class JdtlsClient implements AutoCloseable {
             InitializeResult result = current.languageServer().initialize(params)
                 .get(INIT_TIMEOUT_SECONDS, TimeUnit.SECONDS);
             current.languageServer().initialized(new InitializedParams());
+            DidChangeConfigurationParams configuration = new DidChangeConfigurationParams();
+            configuration.setSettings(settingsSnapshot.settingsCopy());
+            current.languageServer().getWorkspaceService().didChangeConfiguration(configuration);
             initialized = true;
             transitionTo(
                 JdtlsClientState.INDEXING,
@@ -315,6 +335,16 @@ public class JdtlsClient implements AutoCloseable {
             transitionToIfOpen(JdtlsClientState.FAILED, "JDTLS initialization failed", e.getMessage());
             throw e;
         }
+    }
+
+    private JsonObject createInitializationOptions() {
+        JsonObject extendedCapabilities = new JsonObject();
+        extendedCapabilities.addProperty("classFileContentsSupport", true);
+
+        JsonObject options = new JsonObject();
+        options.add("extendedClientCapabilities", extendedCapabilities);
+        options.add("settings", settingsSnapshot.settingsCopy());
+        return options;
     }
 
     private ClientCapabilities createClientCapabilities() {
@@ -536,6 +566,9 @@ public class JdtlsClient implements AutoCloseable {
             }
             if (status == BuildWorkspaceStatus.WITH_ERROR || status == BuildWorkspaceStatus.CANCELLED) {
                 LOG.warn("java/buildWorkspace returned {}", status);
+                transitionToIfOpen(JdtlsClientState.DEGRADED,
+                    "Workspace build completed with errors (status=" + status + ")",
+                    recovery.getLastRecoveryReason());
             }
             return null;
         }));
@@ -554,6 +587,9 @@ public class JdtlsClient implements AutoCloseable {
             }
             if (status == BuildWorkspaceStatus.WITH_ERROR || status == BuildWorkspaceStatus.CANCELLED) {
                 LOG.warn("java/buildWorkspace (incremental) returned {}", status);
+                transitionToIfOpen(JdtlsClientState.DEGRADED,
+                    "Workspace build completed with errors (status=" + status + ")",
+                    recovery.getLastRecoveryReason());
             }
             return null;
         }));
@@ -806,19 +842,19 @@ public class JdtlsClient implements AutoCloseable {
             if (closed) {
                 return getIndexingStatus();
             }
-            JdtlsSessionManager.RuntimeSession current = sessions.requireSession();
-            BuildWorkspaceStatus status = current.languageServer()
-                .buildWorkspace(Either.forLeft(true))
-                .get(RuntimeConstants.BUILD_TIMEOUT_SECONDS, TimeUnit.SECONDS);
-            if (status == BuildWorkspaceStatus.FAILED) {
-                throw new IOException("java/buildWorkspace CLEAN+FULL returned FAILED");
+            restartInternal(true, "manual reindex requested", true);
+            if (closed) {
+                return getIndexingStatus();
             }
-            if (status == BuildWorkspaceStatus.WITH_ERROR || status == BuildWorkspaceStatus.CANCELLED) {
-                LOG.warn("reindexWorkspace: java/buildWorkspace returned {}", status);
+            boolean ready = waitForReadyOrClosed(reindexReadyTimeout);
+            if (closed) {
+                return getIndexingStatus();
             }
-            // buildWorkspace runs on an already-initialized JDTLS — no new ServiceReady arrives.
-            // Transition to READY directly so finishRecovery() doesn't leave us stuck in INDEXING.
+            if (!ready) {
+                throw new TimeoutException("Timed out waiting for JDTLS ServiceReady after reindex");
+            }
             transitionToIfOpen(JdtlsClientState.READY, "Reindex complete", recovery.getLastRecoveryReason());
+            buildIncremental();
         } catch (Exception ex) {
             transitionTo(JdtlsClientState.FAILED, "JDTLS reindex failed", ex.getMessage());
             throw ex;
@@ -826,6 +862,24 @@ public class JdtlsClient implements AutoCloseable {
             recovery.finishRecovery();
         }
         return getIndexingStatus();
+    }
+
+    /**
+     * Polls for ServiceReady in short slices instead of one long blocking wait, so a concurrent
+     * close() unblocks this promptly instead of stalling for the full timeout.
+     */
+    private boolean waitForReadyOrClosed(Duration timeout) throws InterruptedException {
+        long pollSliceMillis = 200;
+        long deadlineNanos = System.nanoTime() + timeout.toNanos();
+        while (System.nanoTime() < deadlineNanos) {
+            if (closed) {
+                return false;
+            }
+            if (languageClient.waitForReady(pollSliceMillis, TimeUnit.MILLISECONDS)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private String restartInternal(boolean cleanDataDir, String reason, boolean manual) throws Exception {
@@ -883,7 +937,11 @@ public class JdtlsClient implements AutoCloseable {
     }
 
     public static JdtlsClient createAndInitialize(Path workspaceRoot, String jdtlsCommand) throws Exception {
-        return createAndInitialize(workspaceRoot, jdtlsCommand, JdtlsSessionManager.defaultFactory());
+        return createAndInitialize(
+                workspaceRoot,
+                jdtlsCommand,
+                JdtlsSessionManager.defaultFactory(),
+                defaultSettings());
     }
 
     public static JdtlsClient createAndInitialize(
@@ -891,13 +949,22 @@ public class JdtlsClient implements AutoCloseable {
         Optional<Path> lombokJar) throws Exception {
         return createAndInitialize(
             workspaceRoot, jdtlsCommand,
-            JdtlsSessionManager.defaultFactory(lombokJar));
+            JdtlsSessionManager.defaultFactory(lombokJar),
+            defaultSettings());
     }
 
     static JdtlsClient createAndInitialize(
         Path workspaceRoot, String jdtlsCommand,
         JdtlsSessionManager.RuntimeSessionFactory factory) throws Exception {
-        JdtlsClient client = new JdtlsClient(workspaceRoot, jdtlsCommand, factory, new DiagnosticsCache());
+        return createAndInitialize(workspaceRoot, jdtlsCommand, factory, defaultSettings());
+    }
+
+    static JdtlsClient createAndInitialize(
+        Path workspaceRoot, String jdtlsCommand,
+        JdtlsSessionManager.RuntimeSessionFactory factory,
+        JdtlsSettingsSnapshot settingsSnapshot) throws Exception {
+        JdtlsClient client = new JdtlsClient(
+                workspaceRoot, jdtlsCommand, factory, new DiagnosticsCache(), settingsSnapshot);
         try {
             client.initialize();
             return client;
@@ -909,14 +976,19 @@ public class JdtlsClient implements AutoCloseable {
             deleteDirectory(client.dataDir);
             Files.createDirectories(client.dataDir);
         }
-        JdtlsClient retry = new JdtlsClient(workspaceRoot, jdtlsCommand, factory, new DiagnosticsCache());
+        JdtlsClient retry = new JdtlsClient(
+                workspaceRoot, jdtlsCommand, factory, new DiagnosticsCache(), settingsSnapshot);
         retry.initialize();
         return retry;
     }
 
     public static JdtlsClient createAndInitializeAsync(Path workspaceRoot, String jdtlsCommand)
         throws IOException {
-        return createAndInitializeAsync(workspaceRoot, jdtlsCommand, JdtlsSessionManager.defaultFactory());
+        return createAndInitializeAsync(
+                workspaceRoot,
+                jdtlsCommand,
+                JdtlsSessionManager.defaultFactory(),
+                defaultSettings());
     }
 
     public static JdtlsClient createAndInitializeAsync(
@@ -924,17 +996,37 @@ public class JdtlsClient implements AutoCloseable {
         Optional<Path> lombokJar) throws IOException {
         return createAndInitializeAsync(
             workspaceRoot, jdtlsCommand,
-            JdtlsSessionManager.defaultFactory(lombokJar));
+            JdtlsSessionManager.defaultFactory(lombokJar),
+            defaultSettings());
+    }
+
+    public static JdtlsClient createAndInitializeAsync(
+        Path workspaceRoot, String jdtlsCommand,
+        Optional<Path> lombokJar,
+        JdtlsSettingsSnapshot settingsSnapshot) throws IOException {
+        return createAndInitializeAsync(
+                workspaceRoot,
+                jdtlsCommand,
+                JdtlsSessionManager.defaultFactory(lombokJar),
+                settingsSnapshot);
     }
 
     static JdtlsClient createAndInitializeAsync(
         Path workspaceRoot, String jdtlsCommand,
         JdtlsSessionManager.RuntimeSessionFactory factory) throws IOException {
+        return createAndInitializeAsync(workspaceRoot, jdtlsCommand, factory, defaultSettings());
+    }
+
+    static JdtlsClient createAndInitializeAsync(
+        Path workspaceRoot, String jdtlsCommand,
+        JdtlsSessionManager.RuntimeSessionFactory factory,
+        JdtlsSettingsSnapshot settingsSnapshot) throws IOException {
         JdtlsClient client = new JdtlsClient(
             workspaceRoot,
             jdtlsCommand,
             factory,
-            new DiagnosticsCache()
+            new DiagnosticsCache(),
+            settingsSnapshot
         );
         Thread thread = new Thread(
             () -> {
@@ -978,6 +1070,12 @@ public class JdtlsClient implements AutoCloseable {
         client.asyncInitThread = thread;
         thread.start();
         return client;
+    }
+
+    private static JdtlsSettingsSnapshot defaultSettings() throws IOException {
+        return JdtlsSettingsLoader.loadDefaults(
+                Path.of(System.getProperty("java.home")),
+                Runtime.version().feature());
     }
 
     private static void deleteDirectory(Path dir) {

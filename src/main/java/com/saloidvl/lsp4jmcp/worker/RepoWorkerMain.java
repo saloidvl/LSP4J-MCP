@@ -2,6 +2,9 @@ package com.saloidvl.lsp4jmcp.worker;
 
 import com.saloidvl.lsp4jmcp.client.JdtlsClient;
 import com.saloidvl.lsp4jmcp.client.LombokSupport;
+import com.saloidvl.lsp4jmcp.config.JdtlsSettingsInputs;
+import com.saloidvl.lsp4jmcp.config.JdtlsSettingsLoader;
+import com.saloidvl.lsp4jmcp.config.JdtlsSettingsSnapshot;
 import com.saloidvl.lsp4jmcp.runtime.RuntimeConstants;
 import com.saloidvl.lsp4jmcp.server.JavaMcpServer;
 import io.modelcontextprotocol.server.McpSyncServer;
@@ -15,10 +18,13 @@ import java.net.Socket;
 import java.net.SocketException;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.stream.Stream;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -58,7 +64,7 @@ public final class RepoWorkerMain {
             }
         }, "worker-shutdown"));
 
-        run(workspace, jdtlsCommand, System.out, new DefaultWorkerRuntime() {
+        startConfigured(workspace, jdtlsCommand, System.getenv(), System.out, new DefaultWorkerRuntime() {
             @Override
             public ServerSocket openServerSocket() throws IOException {
                 ServerSocket ss = super.openServerSocket();
@@ -68,14 +74,54 @@ public final class RepoWorkerMain {
         });
     }
 
-    static void run(Path workspace, String jdtlsCommand, PrintStream readyStream, WorkerRuntime runtime) throws Exception {
-        try (WorkerSession session = runtime.openSession(workspace, jdtlsCommand);
+    static void startConfigured(
+            Path workspace,
+            String jdtlsCommand,
+            Map<String, String> environment,
+            PrintStream readyStream,
+            WorkerRuntime runtime) throws Exception {
+        JdtlsSettingsInputs inputs = JdtlsSettingsInputs.fromEnvironment(environment);
+        JdtlsSettingsSnapshot snapshot;
+        try {
+            snapshot = JdtlsSettingsLoader.load(
+                    workspace,
+                    inputs,
+                    Path.of(System.getProperty("java.home")),
+                    Runtime.version().feature());
+        } catch (Exception exception) {
+            writeStartupError(readyStream, exception);
+            return;
+        }
+        LOG.info(
+                "Loaded JDTLS settings: fingerprint={}, envOverrides={}, settingsFileConfigured={}",
+                snapshot.sourceFingerprint().substring(0, 12),
+                Stream.of(
+                                inputs.runtimeHome(),
+                                inputs.gradleJavaHome(),
+                                inputs.gradleAptEnabled(),
+                                inputs.gradleOfflineEnabled(),
+                                inputs.lombokSupportEnabled())
+                        .filter(Objects::nonNull)
+                        .count(),
+                inputs.settingsFile() != null);
+        run(workspace, jdtlsCommand, snapshot, readyStream, runtime);
+    }
+
+    static void run(
+            Path workspace,
+            String jdtlsCommand,
+            JdtlsSettingsSnapshot snapshot,
+            PrintStream readyStream,
+            WorkerRuntime runtime) throws Exception {
+        boolean ready = false;
+        try (WorkerSession session = runtime.openSession(workspace, jdtlsCommand, snapshot);
              ServerSocket serverSocket = runtime.openServerSocket()) {
             session.initialize();
 
             int port = serverSocket.getLocalPort();
-            readyStream.println("READY " + port);
+            readyStream.println("READY " + port + " " + snapshot.sourceFingerprint());
             readyStream.flush();
+            ready = true;
             runtime.onReady(port);
 
             while (!Thread.currentThread().isInterrupted()) {
@@ -89,11 +135,33 @@ public final class RepoWorkerMain {
                     throw e;
                 }
             }
+        } catch (Exception exception) {
+            if (!ready) {
+                writeStartupError(readyStream, exception);
+                return;
+            }
+            throw exception;
         }
     }
 
+    private static void writeStartupError(PrintStream readyStream, Exception exception) {
+        readyStream.println("ERROR " + singleLineMessage(exception));
+        readyStream.flush();
+    }
+
+    private static String singleLineMessage(Exception exception) {
+        String message = exception.getMessage();
+        if (message == null || message.isBlank()) {
+            message = exception.getClass().getSimpleName();
+        }
+        return message.replace('\r', ' ').replace('\n', ' ');
+    }
+
     interface WorkerRuntime {
-        WorkerSession openSession(Path workspace, String jdtlsCommand) throws Exception;
+        WorkerSession openSession(
+                Path workspace,
+                String jdtlsCommand,
+                JdtlsSettingsSnapshot snapshot) throws Exception;
 
         ServerSocket openServerSocket() throws IOException;
 
@@ -110,10 +178,32 @@ public final class RepoWorkerMain {
         void close() throws Exception;
     }
 
-    private static class DefaultWorkerRuntime implements WorkerRuntime {
+    @FunctionalInterface
+    interface JdtlsClientFactory {
+        JdtlsClient create(
+                Path workspace,
+                String jdtlsCommand,
+                Optional<Path> lombokJar,
+                JdtlsSettingsSnapshot settingsSnapshot) throws IOException;
+    }
+
+    static class DefaultWorkerRuntime implements WorkerRuntime {
+        private final JdtlsClientFactory clientFactory;
+
+        DefaultWorkerRuntime() {
+            this(JdtlsClient::createAndInitializeAsync);
+        }
+
+        DefaultWorkerRuntime(JdtlsClientFactory clientFactory) {
+            this.clientFactory = Objects.requireNonNull(clientFactory, "clientFactory");
+        }
+
         @Override
-        public WorkerSession openSession(Path workspace, String jdtlsCommand) {
-            return new JdtlsWorkerSession(workspace, jdtlsCommand);
+        public WorkerSession openSession(
+                Path workspace,
+                String jdtlsCommand,
+                JdtlsSettingsSnapshot snapshot) {
+            return new JdtlsWorkerSession(workspace, jdtlsCommand, snapshot, clientFactory);
         }
 
         @Override
@@ -125,19 +215,31 @@ public final class RepoWorkerMain {
     private static final class JdtlsWorkerSession implements WorkerSession {
         private final Path workspace;
         private final String jdtlsCommand;
+        private final JdtlsSettingsSnapshot settingsSnapshot;
+        private final JdtlsClientFactory clientFactory;
         private final List<McpSyncServer> activeServers = new CopyOnWriteArrayList<>();
 
         private JdtlsClient client;
 
-        private JdtlsWorkerSession(Path workspace, String jdtlsCommand) {
+        private JdtlsWorkerSession(
+                Path workspace,
+                String jdtlsCommand,
+                JdtlsSettingsSnapshot settingsSnapshot,
+                JdtlsClientFactory clientFactory) {
             this.workspace = workspace;
             this.jdtlsCommand = jdtlsCommand;
+            this.settingsSnapshot = settingsSnapshot;
+            this.clientFactory = clientFactory;
         }
 
         @Override
         public void initialize() throws Exception {
             Optional<Path> lombokJar = LombokSupport.detectAndFind(workspace);
-            this.client = JdtlsClient.createAndInitializeAsync(workspace, jdtlsCommand, lombokJar);
+            this.client = clientFactory.create(
+                    workspace,
+                    jdtlsCommand,
+                    lombokJar,
+                    settingsSnapshot);
         }
 
         @Override

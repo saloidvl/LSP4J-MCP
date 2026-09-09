@@ -9,9 +9,9 @@ This package manages the machine-local worker registry and the lease protocol.
 | `SupervisorMain`        | Unix domain socket server; singleton per machine via `FileLock`. Handles OPEN_LEASE requests, per-repo worker startup, idle shutdown scheduling.           |
 | `SupervisorClient`      | Interface + `SocketSupervisorClient` impl used by `LauncherMain`. `connectOrStart()` starts `SupervisorMain` as a child JVM if the socket is unreachable.  |
 | `WorkerRegistry`        | In-memory map of `repoId → WorkerRecord`. Tracks leases; provides `collectIdleWorkers`.                                                                    |
-| `WorkerRecord`          | Mutable state for one worker: host, port, PID, lease set, last-release timestamp, pending-shutdown future.                                                 |
-| `WorkerState`           | Enum: `READY` (only state currently used; worker is either ready or absent).                                                                               |
-| `WorkerProcessLauncher` | Interface + `JvmWorkerProcessLauncher` impl. Starts `RepoWorkerMain` in a child JVM reusing the current classpath, then polls stdout for `"READY <port>"`. |
+| `WorkerRecord`          | Mutable state for one worker: host, port, PID, settings fingerprint, lease set, last-release timestamp, and pending-shutdown future.                       |
+| `WorkerState`           | Lifecycle state; `READY` workers may receive leases and `STOPPING` workers are quarantined until their exit is confirmed.                                  |
+| `WorkerProcessLauncher` | Interface + `JvmWorkerProcessLauncher` impl. Starts `RepoWorkerMain` in a child JVM reusing the current classpath, then reads `READY <port> <fingerprint>`.  |
 
 ## Supervisor Singleton Protocol
 
@@ -24,8 +24,8 @@ deleted and recreated on each start.
 ```
 LauncherMain                    SupervisorMain
     │──── OPEN_LEASE (JSON) ────►│
-    │                            │ fast path: worker already READY → return host:port
-    │                            │ slow path: per-repo lock → start worker → wait READY
+    │                            │ capture requested settings fingerprint
+    │                            │ per-repo lock → compare/start/register/acquire atomically
     │◄─── {ok, host, port} ──────│
     │──── keep connection open ──►│  (connection open = lease held)
     │──── close connection ───────►│ → scheduleIdleShutdownIfNeeded
@@ -36,13 +36,17 @@ lease. The supervisor detects lease release by reading EOF on the control channe
 
 ## Per-Repo Locking
 
-Worker startup uses a two-level lock:
+Worker compatibility, startup, registration, and first lease acquisition use a two-level lock:
 
-1. `synchronized(this)` — fast path check
-2. `repoLocks.computeIfAbsent(repoId, k -> new Object())` — per-repo lock for slow path
-3. Inner `synchronized(this)` — double-check + register
+1. `repoLocks.computeIfAbsent(repoId, k -> new Object())` serializes the complete operation for one
+   repository.
+2. Short `synchronized(this)` sections inspect or update the registry and acquire a matching lease.
+3. Process startup and bounded shutdown waits remain inside the per-repository lock but outside the
+   global monitor.
 
-This prevents duplicate JDTLS launches when two launchers target the same repo simultaneously.
+This prevents duplicate JDTLS launches and ensures a lease is never handed to a worker running a
+different settings fingerprint. A mismatched idle worker is replaced; an active mismatch is rejected
+with instructions to close the repository's sessions and reconnect.
 
 ## Idle Shutdown
 
@@ -54,11 +58,15 @@ The pending shutdown future is cancelled if a new lease arrives before it fires.
 
 ## Socket Path
 
-`SocketPaths.supervisorSocketPath()` returns `<LSP4J_MCP_SOCKET_DIR>/supervisor.sock` where
-`LSP4J_MCP_SOCKET_DIR` defaults to `/tmp/lsp4j-mcp`. Set `LSP4J_MCP_SOCKET_DIR` in tests to isolate
-socket paths across parallel test runs (see `McpToolsIT`).
+`SocketPaths.supervisorSocketPath()` returns
+`<socket-dir>/supervisor-<version>-p2.sock`. Control-protocol revision 2 is part of the filename, so
+processes using the settings-bearing protocol do not connect to an incompatible older supervisor.
+The default socket directory is `~/.cache/lsp4j-mcp`; `LSP4J_MCP_SOCKET_DIR` overrides it.
 
 ## Worker Startup Timeout
 
-`WorkerProcessLauncher` polls the child process stdout for `"READY <port>"` with a timeout of
-`RuntimeConstants.WORKER_STARTUP_TIMEOUT` (30 s). The port is dynamic (bound to 0 on loopback).
+`WorkerProcessLauncher` waits for `READY <port> <fingerprint>` with a timeout of
+`RuntimeConstants.WORKER_STARTUP_TIMEOUT` (30 s). Before readiness, the worker may instead emit
+`ERROR <message>` and exit when settings cannot be loaded. The port is dynamic (bound to 0 on
+loopback), and the fingerprint is compared with the supervisor's captured settings source before
+registration.

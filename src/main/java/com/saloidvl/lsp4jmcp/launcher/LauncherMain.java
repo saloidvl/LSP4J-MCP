@@ -1,5 +1,6 @@
 package com.saloidvl.lsp4jmcp.launcher;
 
+import com.saloidvl.lsp4jmcp.config.JdtlsSettingsInputs;
 import com.saloidvl.lsp4jmcp.runtime.RuntimeConstants;
 import com.saloidvl.lsp4jmcp.supervisor.SupervisorClient;
 import org.slf4j.Logger;
@@ -11,6 +12,7 @@ import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.nio.file.Path;
+import java.util.Map;
 
 public final class LauncherMain {
     private static final Logger LOG = LoggerFactory.getLogger(LauncherMain.class);
@@ -28,12 +30,14 @@ public final class LauncherMain {
             LOG.error("Uncaught exception in thread '{}'", thread.getName(), ex));
 
         try {
+            JdtlsSettingsInputs settingsInputs = readSettingsInputs(System.getenv());
             run(
                 Path.of(args[0]).toAbsolutePath(),
                 args[1],
                 System.in,
                 System.out,
-                SupervisorClient.connectOrStart()
+                SupervisorClient.connectOrStart(),
+                settingsInputs
             );
         } catch (Exception e) {
             LOG.error("Fatal error in launcher", e);
@@ -46,8 +50,10 @@ public final class LauncherMain {
             String jdtlsCommand,
             InputStream clientInput,
             OutputStream clientOutput,
-            SupervisorClient supervisorClient) throws Exception {
-        try (SupervisorClient.Lease lease = supervisorClient.openLease(workspace, jdtlsCommand)) {
+            SupervisorClient supervisorClient,
+            JdtlsSettingsInputs settingsInputs) throws Exception {
+        try (SupervisorClient.Lease lease =
+                     supervisorClient.openLease(workspace, jdtlsCommand, settingsInputs)) {
             try (Socket socket = new Socket()) {
                 socket.connect(
                     new InetSocketAddress(lease.host(), lease.port()),
@@ -58,6 +64,10 @@ public final class LauncherMain {
                 upstream.join();
             }
         }
+    }
+
+    static JdtlsSettingsInputs readSettingsInputs(Map<String, String> environment) {
+        return JdtlsSettingsInputs.fromEnvironment(environment);
     }
 
     private static void copyClientToWorker(InputStream clientInput, Socket socket) {

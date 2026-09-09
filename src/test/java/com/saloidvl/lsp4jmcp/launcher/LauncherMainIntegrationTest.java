@@ -1,5 +1,6 @@
 package com.saloidvl.lsp4jmcp.launcher;
 
+import com.saloidvl.lsp4jmcp.config.JdtlsSettingsInputs;
 import com.saloidvl.lsp4jmcp.supervisor.SupervisorClient;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -43,7 +44,7 @@ class LauncherMainIntegrationTest {
                 @Override public void close() { leaseClosed.set(true); }
             };
 
-            SupervisorClient supervisorClient = (workspacePath, jdtlsCommand) -> lease;
+            SupervisorClient supervisorClient = (workspacePath, jdtlsCommand, settingsInputs) -> lease;
 
             ByteArrayOutputStream output = new ByteArrayOutputStream();
             LauncherMain.run(
@@ -51,7 +52,8 @@ class LauncherMainIntegrationTest {
                 "jdtls",
                 new ByteArrayInputStream("ping".getBytes()),
                 output,
-                supervisorClient
+                supervisorClient,
+                JdtlsSettingsInputs.empty()
             );
 
             assertThat(workerHandled.await(2, TimeUnit.SECONDS)).isTrue();

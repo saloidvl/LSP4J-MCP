@@ -5,6 +5,7 @@ import java.nio.file.Path;
 public final class SocketPaths {
     private static final String CACHE_DIR_NAME = ".cache";
     private static final String APP_DIR_NAME = "lsp4j-mcp";
+    static final int CONTROL_PROTOCOL_REVISION = 2;
     public static final String SOCKET_DIR_ENV = "LSP4J_MCP_SOCKET_DIR";
 
     private SocketPaths() {
@@ -19,6 +20,8 @@ public final class SocketPaths {
     }
 
     public static Path supervisorSocketPath() {
-        return supervisorSocketDirectory().resolve("supervisor-" + BuildInfo.version() + ".sock");
+        return supervisorSocketDirectory().resolve(
+                "supervisor-" + BuildInfo.version()
+                        + "-p" + CONTROL_PROTOCOL_REVISION + ".sock");
     }
 }

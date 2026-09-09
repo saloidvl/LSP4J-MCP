@@ -86,6 +86,80 @@ Arguments:
 }
 ```
 
+## JDTLS Settings
+
+JDTLS settings can be supplied with individual environment variables and an optional JSON file:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `LSP4JMCP_JDTLS_SETTINGS_FILE` | unset | JSON file containing the `initializationOptions.settings` object. Relative paths are resolved from the workspace root. |
+| `LSP4JMCP_JDTLS_RUNTIME_HOME` | worker `java.home` | Single default JDK advertised through `java.configuration.runtimes`; `JavaSE-N` is inferred from the JDK `release` file. |
+| `LSP4JMCP_JDTLS_GRADLE_JAVA_HOME` | worker `java.home` | JDK used by JDTLS for Gradle project import. |
+| `LSP4JMCP_JDTLS_GRADLE_APT_ENABLED` | `true` | Enables or disables Gradle annotation processing inside JDTLS. |
+| `LSP4JMCP_JDTLS_GRADLE_OFFLINE_ENABLED` | `false` | Enables or disables offline Gradle import. |
+| `LSP4JMCP_JDTLS_LOMBOK_SUPPORT_ENABLED` | `true` | Enables or disables JDTLS Lombok support. |
+
+Boolean values accept only `true` or `false`, case-insensitively. Precedence is
+`defaults < five setting variables < settings file`: objects merge recursively, while arrays replace
+earlier arrays.
+
+Set individual values in `.mcp.json`; do not embed JSON in an environment string:
+
+```json
+{
+  "mcpServers": {
+    "java-lsp": {
+      "command": "java",
+      "args": [
+        "-jar",
+        "/path/to/lsp4j-mcp.jar",
+        "/path/to/workspace",
+        "jdtls"
+      ],
+      "env": {
+        "LSP4JMCP_JDTLS_RUNTIME_HOME": "/opt/jdk-21",
+        "LSP4JMCP_JDTLS_GRADLE_JAVA_HOME": "/opt/jdk-21",
+        "LSP4JMCP_JDTLS_GRADLE_APT_ENABLED": "false",
+        "LSP4JMCP_JDTLS_GRADLE_OFFLINE_ENABLED": "false",
+        "LSP4JMCP_JDTLS_LOMBOK_SUPPORT_ENABLED": "true",
+        "LSP4JMCP_JDTLS_SETTINGS_FILE": ".config/jdtls-settings.json"
+      }
+    }
+  }
+}
+```
+
+The referenced settings file may add arbitrary JDTLS preferences and override common settings:
+
+```json
+{
+  "java": {
+    "completion": {
+      "favoriteStaticMembers": [
+        "org.assertj.core.api.Assertions.*"
+      ]
+    },
+    "import": {
+      "gradle": {
+        "annotationProcessing": {
+          "enabled": true
+        }
+      }
+    }
+  }
+}
+```
+
+Here the file's `enabled: true` wins over the environment example's `false`.
+
+Settings are captured when a repository worker starts and reused by internal JDTLS restart and
+reindex operations. After changing the environment or settings file, reconnect the MCP server so
+the supervisor can replace an idle worker. If other MCP sessions still use the same repository, the
+new connection fails with instructions to close all sessions for that repository and reconnect.
+
+A configured missing or malformed file, an invalid boolean, or an invalid JDK home prevents worker
+startup and identifies the bad input. Full settings and environment values are not printed in logs.
+
 ---
 
 ## Tools

@@ -10,6 +10,7 @@ final class WorkerRecord {
     private final String repoId;
     private final Path workspacePath;
     private final String jdtlsCommand;
+    private final String settingsFingerprint;
     private final Set<Object> leases = new HashSet<>();
 
     private Process process;
@@ -20,10 +21,23 @@ final class WorkerRecord {
     private Instant lastLeaseReleasedAt;
     private ScheduledFuture<?> pendingIdleShutdown;
 
-    WorkerRecord(String repoId, Path workspacePath, String jdtlsCommand, Process process, long workerPid, String host, int port, WorkerState state) {
+    WorkerRecord(
+            String repoId,
+            Path workspacePath,
+            String jdtlsCommand,
+            Process process,
+            long workerPid,
+            String host,
+            int port,
+            String settingsFingerprint,
+            WorkerState state) {
+        if (settingsFingerprint == null || settingsFingerprint.isBlank()) {
+            throw new IllegalArgumentException("settingsFingerprint must not be blank");
+        }
         this.repoId = repoId;
         this.workspacePath = workspacePath;
         this.jdtlsCommand = jdtlsCommand;
+        this.settingsFingerprint = settingsFingerprint;
         this.process = process;
         this.workerPid = workerPid;
         this.host = host;
@@ -41,6 +55,10 @@ final class WorkerRecord {
 
     String jdtlsCommand() {
         return jdtlsCommand;
+    }
+
+    String settingsFingerprint() {
+        return settingsFingerprint;
     }
 
     Process process() {
