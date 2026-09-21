@@ -830,8 +830,12 @@ class JdtlsClientTest {
 
         JdtlsClient client = JdtlsClient.createAndInitializeAsync(tempDir, "/fake/jdtls", factory);
         try {
+            // The retry sequence passes through several transient FAILED states
+            // ("JDTLS initialization failed", "JDTLS recovery failed") before settling on the
+            // final "Async initialization failed" once the retry attempt also fails — poll for
+            // that specific message rather than the first appearance of status=failed.
             long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
-            while (!client.getIndexingStatus().contains("status=failed")
+            while (!client.getIndexingStatus().contains("Async initialization failed")
                     && System.nanoTime() < deadline) {
                 Thread.sleep(20);
             }
