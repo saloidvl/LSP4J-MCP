@@ -98,7 +98,8 @@ class McpServerMainTest {
 
     @Test
     void findReferencesMethodSignature_isCorrect() throws NoSuchMethodException {
-        Method method = JavaTools.class.getMethod("findReferences", String.class, int.class, int.class);
+        Method method =
+            JavaTools.class.getMethod("findReferences", String.class, int.class, Integer.class, String.class);
         assertThat(method.getReturnType()).isEqualTo(String.class);
     }
 

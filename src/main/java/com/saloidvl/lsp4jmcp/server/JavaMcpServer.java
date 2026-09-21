@@ -83,17 +83,16 @@ public final class JavaMcpServer {
                 Tool.builder()
                     .name("find_references")
                     .description("""
-                    Find all references to a symbol at a given file location.
+                    Find all references to a symbol at a given file location. Provide either character \
+                    (1-based column) or symbol (the identifier name to locate on the line) — the server finds \
+                    the column automatically when symbol is given. Each result includes a `context` field with \
+                    up to 3 source lines before and after the reference.
 
-                    LIMITATION: for a Lombok-generated accessor (e.g. `obj.getFoo()`), JDT's search index \
-                    doesn't see the synthetic method, so this returns only the call site itself (count=1) \
-                    instead of all usages.
-
-                    To detect and work around this: call find_definition on the accessor call site first. \
-                    If it resolves to a FIELD declaration whose name is the accessor name with its get/is/set/with \
-                    prefix stripped and decapitalized (e.g. `getFoo` -> `foo`), it's a Lombok-generated accessor \
-                    — call find_references again on that field's location instead; JDT aggregates both direct \
-                    field access and all accessor call sites when queried from the field.
+                    Lombok accessors (e.g. `obj.getFoo()`) are handled automatically: when the position is a \
+                    getX/isX/setX/withX call whose definition resolves to the backing field (a JDT+Lombok quirk — \
+                    Lombok-generated accessors aren't in source, so go-to-definition falls back to the field), the \
+                    query is transparently redirected to the field's position, so the result already aggregates \
+                    direct field access and all accessor call sites — no separate find_definition round-trip needed.
                     """)
                     .inputSchema(objectMapper.readValue("""
                     {
@@ -101,25 +100,30 @@ public final class JavaMcpServer {
                       "properties": {
                         "file": { "type": "string", "description": "Path to the Java file" },
                         "line": { "type": "integer", "description": "Line number (1-based)" },
-                        "character": { "type": "integer", "description": "Character/column position (1-based)" }
+                        "character": { "type": "integer", "description": "Character/column position (1-based); optional if symbol is provided" },
+                        "symbol": { "type": "string", "description": "identifier name to locate on the line (e.g. class, method, or field name); used to find character automatically" }
                       },
-                      "required": ["file", "line", "character"]
+                      "required": ["file", "line"]
                     }
                     """, McpSchema.JsonSchema.class))
                     .build(),
                 (exchange, request) -> {
                     String file = (String) request.arguments().get("file");
                     int line = ((Number) request.arguments().get("line")).intValue();
-                    int character = ((Number) request.arguments().get("character")).intValue();
+                    Integer character = request.arguments().get("character") != null
+                        ? ((Number) request.arguments().get("character")).intValue()
+                        : null;
+                    String symbol = (String) request.arguments().get("symbol");
                     return CallToolResult.builder()
-                        .addTextContent(javaTools.findReferences(file, line, character))
+                        .addTextContent(javaTools.findReferences(file, line, character, symbol))
                         .build();
                 })
 
             .toolCall(
                 Tool.builder()
                     .name("find_definition")
-                    .description("Go to the definition of a symbol at a given file location. Provide either character (1-based column) or symbol (the identifier name to locate on the line) — the server finds the column automatically when symbol is given. character must point to an identifier token, not whitespace, a keyword, or punctuation; the response includes position_resolved to distinguish an invalid position from a genuine \"no definition found.\"")
+                    .description(
+                        "Go to the definition of a symbol at a given file location. Provide either character (1-based column) or symbol (the identifier name to locate on the line) — the server finds the column automatically when symbol is given. character must point to an identifier token, not whitespace, a keyword, or punctuation; the response includes position_resolved to distinguish an invalid position from a genuine \"no definition found.\" Each result includes a `context` field with up to 3 source lines before and after.")
                     .inputSchema(objectMapper.readValue("""
                     {
                       "type": "object",
@@ -246,7 +250,8 @@ public final class JavaMcpServer {
             .toolCall(
                 Tool.builder()
                     .name("find_implementations")
-                    .description("Find all implementations of an interface method or abstract method at the given position.")
+                    .description(
+                        "Find all implementations of an interface method or abstract method at the given position. Each result includes a `context` field with up to 3 source lines before and after.")
                     .inputSchema(objectMapper.readValue("""
                     {
                       "type": "object",
@@ -302,7 +307,8 @@ public final class JavaMcpServer {
             .toolCall(
                 Tool.builder()
                     .name("find_incoming_calls")
-                    .description("Find all call sites where the method at the given position is called from. Provide either character (1-based column) or symbol (the method name to locate on the line). character must point to the method name token. When position is invalid (not on a callable element), found is false; when position is valid but no callers exist, found is true and count is 0.")
+                    .description(
+                        "Find all call sites where the method at the given position is called from. Provide either character (1-based column) or symbol (the method name to locate on the line). character must point to the method name token. When position is invalid (not on a callable element), found is false; when position is valid but no callers exist, found is true and count is 0. Each call site includes a `context` field with up to 3 source lines before and after.")
                     .inputSchema(objectMapper.readValue("""
                     {
                       "type": "object",
@@ -333,7 +339,8 @@ public final class JavaMcpServer {
             .toolCall(
                 Tool.builder()
                     .name("find_outgoing_calls")
-                    .description("Find all methods called by the method at the given position. Provide either character (1-based column) or symbol (the method name to locate on the line). character must point to the method name token. When position is invalid, found is false; when valid but no calls are found, found is true and count is 0. Limitation: only calls to project-local types are returned; calls to external library types and JDK stdlib are excluded by Eclipse JDT's call hierarchy implementation. On generic methods, duplicate entries may appear for the same call site.")
+                    .description(
+                        "Find all methods called by the method at the given position. Provide either character (1-based column) or symbol (the method name to locate on the line). character must point to the method name token. When position is invalid, found is false; when valid but no calls are found, found is true and count is 0. Limitation: only calls to project-local types are returned; calls to external library types and JDK stdlib are excluded by Eclipse JDT's call hierarchy implementation. On generic methods, duplicate entries may appear for the same call site. Each call site includes a `context` field with up to 3 source lines before and after.")
                     .inputSchema(objectMapper.readValue("""
                     {
                       "type": "object",
@@ -475,7 +482,7 @@ public final class JavaMcpServer {
                 Tool.builder()
                     .name("get_type_definition")
                     .description(
-                        "Resolve the declared type of the symbol at the given position. Useful when a variable is declared as an interface. Provide either character (1-based column) or symbol (identifier name to locate on the line).")
+                        "Resolve the declared type of the symbol at the given position. Useful when a variable is declared as an interface. Provide either character (1-based column) or symbol (identifier name to locate on the line). Each result includes a `context` field with up to 3 source lines before and after.")
                     .inputSchema(objectMapper.readValue(
                         """
                             {

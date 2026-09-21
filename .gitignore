@@ -52,3 +52,4 @@ mcp-config.json
 .claude/
 /logs/
 /docs/
+/src/it/fixtures/java-sample/bin/

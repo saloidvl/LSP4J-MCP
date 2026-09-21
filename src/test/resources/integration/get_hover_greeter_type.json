@@ -1,0 +1,5 @@
+{
+  "found": true,
+  "content": "com.example.sample.Greeter\n\nGreets a person by name.\n\nSource: *[java-sample](file://$FIXTURE/src/main/java/com/example/sample/Greeter.java#7)*",
+  "range": null
+}
