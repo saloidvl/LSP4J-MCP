@@ -1,0 +1,32 @@
+{
+  "file": "$FIXTURE/src/main/java/com/example/sample/ConfigHolder.java",
+  "line": 4,
+  "character": 35,
+  "count": 3,
+  "references": [
+    {
+      "file": "$FIXTURE/src/main/java/com/example/sample/ConfigHolder.java",
+      "startLine": 4,
+      "startColumn": 35,
+      "endLine": 4,
+      "endColumn": 41,
+      "context": "package com.example.sample;\n\npublic class ConfigHolder {\n    private final CommonConfigDto common;\n\n    public ConfigHolder(CommonConfigDto common) {\n        this.common = common;"
+    },
+    {
+      "file": "$FIXTURE/src/main/java/com/example/sample/ConfigHolder.java",
+      "startLine": 7,
+      "startColumn": 14,
+      "endLine": 7,
+      "endColumn": 20,
+      "context": "    private final CommonConfigDto common;\n\n    public ConfigHolder(CommonConfigDto common) {\n        this.common = common;\n    }\n\n    public CommonConfigDto getCommon() {"
+    },
+    {
+      "file": "$FIXTURE/src/main/java/com/example/sample/ConfigHolder.java",
+      "startLine": 11,
+      "startColumn": 16,
+      "endLine": 11,
+      "endColumn": 22,
+      "context": "    }\n\n    public CommonConfigDto getCommon() {\n        return common;\n    }\n}"
+    }
+  ]
+}

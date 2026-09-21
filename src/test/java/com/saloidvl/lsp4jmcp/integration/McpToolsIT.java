@@ -91,7 +91,17 @@ class McpToolsIT {
         assertThat(tools.tools()).hasSize(20);
 
         pollUntilReady(INDEXING_TIMEOUT);
+
+        // get_diagnostics only reads a cache populated by async publishDiagnostics notifications,
+        // which JDTLS sends lazily per file (triggered by the first didOpen for that file) with no
+        // synchronous wait anywhere. indexing_status=ready does not guarantee any file's diagnostics
+        // have been published yet, and the java/buildWorkspace response that refresh_diagnostics
+        // waits on can return before the corresponding publishDiagnostics notification is
+        // processed. Poll get_diagnostics for GreeterImpl.java (the file the flaky tests assert on)
+        // until its cache entry is actually populated, so every test runs against a warm cache
+        // regardless of @Test method execution order (unspecified — most methods are unannotated).
         callTool("refresh_diagnostics", Map.of());
+        pollUntilDiagnosticsPresent(fixtureFile("GreeterImpl.java"), INDEXING_TIMEOUT);
     }
 
     @AfterAll
@@ -126,11 +136,49 @@ class McpToolsIT {
     }
 
     @Test
+    void documentSymbols_compact_returnsOnlyNameAndKind() throws Exception {
+        String expected = getFromFile("integration/document_symbols_greeter_impl_compact.json");
+        String actual = callTool(
+            "document_symbols", Map.of("file", fixtureFile("GreeterImpl.java"), "compact", true));
+
+        JSONAssert.assertEquals(expected, actual, JSONCompareMode.NON_EXTENSIBLE);
+    }
+
+    @Test
     void findReferences_findsGreetCallSites() throws Exception {
         String expected = getFromFile("integration/find_references_greet.json");
         String actual = callTool(
             "find_references", Map.of(
                 "file", fixtureFile("GreeterImpl.java"), "line", 6, "character", 20));
+
+        JSONAssert.assertEquals(expected, actual, JSONCompareMode.NON_EXTENSIBLE);
+    }
+
+    @Test
+    void findReferences_lombokAccessor_aggregatesFieldAndAccessorCallSites() throws Exception {
+        // LombokConsumer.java line 6: "        return dto.getId() + dto.getKey();"
+        // "getId" is a Lombok-generated accessor (JDT+Lombok quirk: go-to-definition on it
+        // resolves to the backing field). Querying from the accessor call site must return the
+        // same aggregated set as querying from the field directly (field decl + accessor call
+        // site + builder call), not just the single accessor call site itself.
+        String expected = getFromFile("integration/find_references_lombok_accessor.json");
+        String actual = callTool(
+            "find_references", Map.of(
+                "file", fixtureFile("LombokConsumer.java"), "line", 6, "symbol", "getId"));
+
+        JSONAssert.assertEquals(expected, actual, JSONCompareMode.NON_EXTENSIBLE);
+    }
+
+    @Test
+    void findReferences_bySymbol_onAmbiguousFieldLine() throws Exception {
+        // ConfigHolder.java line 4: "    private final CommonConfigDto common;"
+        // symbol "common" must resolve to the field name, not anything inside "CommonConfigDto",
+        // and must not NPE when "character" is omitted (regression: old handler unboxed a null
+        // "character" argument directly).
+        String expected = getFromFile("integration/find_references_ambiguous_field.json");
+        String actual = callTool(
+            "find_references", Map.of(
+                "file", fixtureFile("ConfigHolder.java"), "line", 4, "symbol", "common"));
 
         JSONAssert.assertEquals(expected, actual, JSONCompareMode.NON_EXTENSIBLE);
     }
@@ -202,7 +250,7 @@ class McpToolsIT {
         String expected = getFromFile("integration/find_implementations_greet.json");
         String actual = callTool(
             "find_implementations", Map.of(
-                "file", fixtureFile("Greeter.java"), "line", 5, "character", 13));
+                "file", fixtureFile("Greeter.java"), "line", 8, "character", 13));
 
         JSONAssert.assertEquals(expected, actual, JSONCompareMode.NON_EXTENSIBLE);
     }
@@ -212,7 +260,7 @@ class McpToolsIT {
         String expected = getFromFile("integration/get_type_hierarchy_greeter.json");
         String actual = callTool(
             "get_type_hierarchy", Map.of(
-                "file", fixtureFile("Greeter.java"), "line", 4, "character", 18));
+                "file", fixtureFile("Greeter.java"), "line", 7, "character", 18));
 
         JSONAssert.assertEquals(expected, actual, JSONCompareMode.NON_EXTENSIBLE);
     }
@@ -271,6 +319,16 @@ class McpToolsIT {
         String actual = callTool(
             "get_hover", Map.of(
                 "file", fixtureFile("GreeterImpl.java"), "line", 7, "character", 30));
+
+        JSONAssert.assertEquals(expected, actual, JSONCompareMode.NON_EXTENSIBLE);
+    }
+
+    @Test
+    void getHover_returnsTypeInfoForImplementedInterface() throws Exception {
+        String expected = getFromFile("integration/get_hover_greeter_type.json");
+        String actual = callTool(
+            "get_hover", Map.of(
+                "file", fixtureFile("GreeterImpl.java"), "line", 3, "symbol", "Greeter"));
 
         JSONAssert.assertEquals(expected, actual, JSONCompareMode.NON_EXTENSIBLE);
     }
@@ -395,6 +453,20 @@ class McpToolsIT {
             "JDTLS did not reach ready within " + timeout
             + "; last status: " + lastStatus
             + "; server stderr:" + System.lineSeparator() + serverErrors());
+    }
+
+    private void pollUntilDiagnosticsPresent(String file, Duration timeout) throws Exception {
+        long deadline = System.nanoTime() + timeout.toNanos();
+        String lastResponse = "";
+        while (System.nanoTime() < deadline) {
+            lastResponse = callTool("get_diagnostics", Map.of("file", file));
+            if (!lastResponse.contains("\"diagnostics\": []"))
+                return;
+            Thread.sleep(300);
+        }
+        throw new AssertionError(
+            "Diagnostics for " + file + " were not published within " + timeout
+            + "; last response: " + lastResponse);
     }
 
     private String fixtureFile(String fileName) {

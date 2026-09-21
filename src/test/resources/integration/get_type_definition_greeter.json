@@ -6,10 +6,11 @@
   "definitions": [
     {
       "file": "$FIXTURE/src/main/java/com/example/sample/Greeter.java",
-      "startLine": 4,
+      "startLine": 7,
       "startColumn": 18,
-      "endLine": 4,
-      "endColumn": 25
+      "endLine": 7,
+      "endColumn": 25,
+      "context": " * Greets a person by name.\n */\n@SuppressWarnings(\"unused\")\npublic interface Greeter {\n    String greet(String name);\n}"
     }
   ]
 }

@@ -7,7 +7,7 @@
       "kind": "Method",
       "container": "Greeter",
       "file": "$FIXTURE/src/main/java/com/example/sample/Greeter.java",
-      "line": 5,
+      "line": 8,
       "column": 5,
       "containerKind": "Interface"
     }

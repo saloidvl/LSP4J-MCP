@@ -9,7 +9,8 @@
       "startLine": 7,
       "startColumn": 16,
       "endLine": 7,
-      "endColumn": 48
+      "endColumn": 48,
+      "context": "\n    @Override\n    public String greet(String name) {\n        return MessageHelper.buildMessage(name);\n    }\n}"
     }
   ]
 }

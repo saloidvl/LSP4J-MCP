@@ -9,7 +9,8 @@
       "startLine": 7,
       "startColumn": 34,
       "endLine": 7,
-      "endColumn": 48
+      "endColumn": 48,
+      "context": "\n    public static void main(String[] args) {\n        Greeter greeter = new GreeterImpl();\n        String message = greeter.greet(\"World\");\n        System.out.println(message);\n    }\n}"
     }
   ]
 }

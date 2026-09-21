@@ -7,6 +7,7 @@ public record CallSiteResult(
     int startLine,
     int startColumn,
     int endLine,
-    int endColumn
+    int endColumn,
+    String context
 ) {
 }

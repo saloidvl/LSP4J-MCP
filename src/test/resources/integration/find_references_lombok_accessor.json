@@ -1,0 +1,32 @@
+{
+  "file": "$FIXTURE/src/main/java/com/example/sample/LombokConsumer.java",
+  "line": 6,
+  "character": 20,
+  "count": 3,
+  "references": [
+    {
+      "file": "$FIXTURE/src/main/java/com/example/sample/LombokDto.java",
+      "startLine": 11,
+      "startColumn": 26,
+      "endLine": 11,
+      "endColumn": 28,
+      "context": "@Builder\n@RequiredArgsConstructor\npublic class LombokDto {\n    private final String id;\n    private final String key;\n}"
+    },
+    {
+      "file": "$FIXTURE/src/main/java/com/example/sample/LombokConsumer.java",
+      "startLine": 6,
+      "startColumn": 20,
+      "endLine": 6,
+      "endColumn": 27,
+      "context": "public class LombokConsumer {\n    public String describe() {\n        LombokDto dto = LombokDto.builder().id(\"1\").key(\"k\").build();\n        return dto.getId() + dto.getKey();\n    }\n}"
+    },
+    {
+      "file": "$FIXTURE/src/main/java/com/example/sample/LombokConsumer.java",
+      "startLine": 5,
+      "startColumn": 45,
+      "endLine": 5,
+      "endColumn": 52,
+      "context": "\npublic class LombokConsumer {\n    public String describe() {\n        LombokDto dto = LombokDto.builder().id(\"1\").key(\"k\").build();\n        return dto.getId() + dto.getKey();\n    }\n}"
+    }
+  ]
+}

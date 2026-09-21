@@ -9,14 +9,16 @@
       "startLine": 7,
       "startColumn": 34,
       "endLine": 7,
-      "endColumn": 48
+      "endColumn": 48,
+      "context": "\n    public static void main(String[] args) {\n        Greeter greeter = new GreeterImpl();\n        String message = greeter.greet(\"World\");\n        System.out.println(message);\n    }\n}"
     },
     {
       "file": "$FIXTURE/src/main/java/com/example/sample/GreeterImpl.java",
       "startLine": 6,
       "startColumn": 19,
       "endLine": 6,
-      "endColumn": 24
+      "endColumn": 24,
+      "context": "public class GreeterImpl implements Greeter {\n\n    @Override\n    public String greet(String name) {\n        return MessageHelper.buildMessage(name);\n    }\n}"
     }
   ]
 }

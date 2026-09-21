@@ -1,0 +1,14 @@
+{
+  "file": "$FIXTURE/src/main/java/com/example/sample/GreeterImpl.java",
+  "count": 2,
+  "symbols": [
+    {
+      "name": "GreeterImpl",
+      "kind": "Class"
+    },
+    {
+      "name": "greet(String)",
+      "kind": "Method"
+    }
+  ]
+}

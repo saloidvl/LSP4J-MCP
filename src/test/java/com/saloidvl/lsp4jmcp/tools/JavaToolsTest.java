@@ -40,6 +40,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -288,7 +289,7 @@ class JavaToolsTest {
             .when(jdtlsClient).findReferences("file:///test/workspace/Test.java", 9, 4);
 
         // When
-        String result = javaTools.findReferences("Test.java", 10, 5);
+        String result = javaTools.findReferences("Test.java", 10, 5, null);
 
         // Then
         JsonObject json = gson.fromJson(result, JsonObject.class);
@@ -307,7 +308,7 @@ class JavaToolsTest {
             .when(jdtlsClient).findReferences("file:///test/workspace/Test.java", 4, 9);
 
         // When
-        String result = javaTools.findReferences("Test.java", 5, 10);
+        String result = javaTools.findReferences("Test.java", 5, 10, null);
 
         // Then
         JsonObject json = gson.fromJson(result, JsonObject.class);
@@ -323,13 +324,35 @@ class JavaToolsTest {
     }
 
     @Test
+    void findReferences_includesContextAroundReference(@TempDir Path dir) throws Exception {
+        // Given - a 9-line file; reference sits on line 5 (1-based)
+        Path file = dir.resolve("Context.java");
+        Files.writeString(
+            file, String.join(
+                "\n", List.of(
+                    "line1", "line2", "line3", "line4", "line5", "line6", "line7", "line8", "line9")) + "\n");
+        Location ref = new Location(
+            file.toUri().toString(), new Range(new Position(4, 0), new Position(4, 5)));
+        doReturn(List.of(ref)).when(jdtlsClient).findReferences(anyString(), anyInt(), anyInt());
+
+        // When
+        String result = javaTools.findReferences("Test.java", 10, 5, null);
+
+        // Then - context is 3 lines before + the line + 3 lines after (radius=3)
+        JsonObject json = gson.fromJson(result, JsonObject.class);
+        JsonObject reference = json.getAsJsonArray("references").get(0).getAsJsonObject();
+        assertThat(reference.get("context").getAsString())
+            .isEqualTo(String.join("\n", List.of("line2", "line3", "line4", "line5", "line6", "line7", "line8")));
+    }
+
+    @Test
     void findReferences_includesRequestLocationInResponse() throws Exception {
         // Given
         doReturn(List.of())
             .when(jdtlsClient).findReferences(anyString(), anyInt(), anyInt());
 
         // When
-        String result = javaTools.findReferences("MyFile.java", 42, 15);
+        String result = javaTools.findReferences("MyFile.java", 42, 15, null);
 
         // Then
         JsonObject json = gson.fromJson(result, JsonObject.class);
@@ -345,7 +368,7 @@ class JavaToolsTest {
             .when(jdtlsClient).findReferences(anyString(), anyInt(), anyInt());
 
         // When
-        String result = javaTools.findReferences("Test.java", 10, 5);
+        String result = javaTools.findReferences("Test.java", 10, 5, null);
 
         // Then
         JsonObject json = gson.fromJson(result, JsonObject.class);
@@ -360,7 +383,7 @@ class JavaToolsTest {
             .when(jdtlsClient).findReferences(anyString(), anyInt(), anyInt());
 
         // When
-        String result = javaTools.findReferences("Test.java", 10, 5);
+        String result = javaTools.findReferences("Test.java", 10, 5, null);
 
         // Then
         JsonObject json = gson.fromJson(result, JsonObject.class);
@@ -374,7 +397,7 @@ class JavaToolsTest {
             .when(jdtlsClient).findReferences(eq("file:///test/workspace/Test.java"), anyInt(), anyInt());
 
         // When
-        String result = javaTools.findReferences("Test.java", 10, 5);
+        String result = javaTools.findReferences("Test.java", 10, 5, null);
 
         // Then - verify the URI was correctly formed
         verify(jdtlsClient).findReferences(eq("file:///test/workspace/Test.java"), eq(9), eq(4));
@@ -384,13 +407,116 @@ class JavaToolsTest {
     }
 
     @Test
+    void findReferences_bySymbol_resolvesCharacterAndReturnsLocations(@TempDir Path dir) throws Exception {
+        // Given
+        Path file = dir.resolve("Foo.java");
+        Files.writeString(
+            file,
+            "public class Foo {\n    public String greet(String name) {\n        return name;\n    }\n}\n");
+        Location ref = new Location("file:///test/Caller.java", new Range(new Position(2, 4), new Position(2, 9)));
+        // "greet" is at 1-based column 19 on line 2; LSP receives 0-based: line=1, char=18
+        doReturn(List.of(ref)).when(jdtlsClient).findReferences(anyString(), eq(1), eq(18));
+
+        // When
+        String result = javaTools.findReferences(file.toString(), 2, null, "greet");
+
+        // Then
+        JsonObject json = gson.fromJson(result, JsonObject.class);
+        assertThat(json.get("count").getAsInt()).isEqualTo(1);
+        assertThat(json.get("character").getAsInt()).isEqualTo(19);
+    }
+
+    @Test
+    void findReferences_missingBothCharacterAndSymbol_returnsError() throws Exception {
+        // When
+        String result = javaTools.findReferences("/workspace/src/Foo.java", 5, null, null);
+
+        // Then
+        JsonObject json = gson.fromJson(result, JsonObject.class);
+        assertThat(json.has("error")).isTrue();
+    }
+
+    @Test
+    void findReferences_lombokAccessor_redirectsToBackingField(@TempDir Path dir) throws Exception {
+        // Given - "id" field declared on line 2, "getId" accessor call resolved on line 3
+        Path file = dir.resolve("Foo.java");
+        Files.writeString(
+            file, String.join(
+                "\n", List.of(
+                    "public class Foo {",
+                    "    private final String id;",
+                    "    public String getId() { return id; }",
+                    "}")) + "\n");
+        String fileUri = file.toUri().toString();
+
+        // find_definition on the "getId" accessor resolves to the "id" field (JDT+Lombok quirk):
+        // 0-based line 1, columns 25-27 cover "id" in "    private final String id;"
+        Location fieldDef = new Location(fileUri, new Range(new Position(1, 25), new Position(1, 27)));
+        doReturn(List.of(fieldDef))
+            .when(jdtlsClient).findDefinition(eq(fileUri), anyInt(), anyInt());
+        doReturn(List.of())
+            .when(jdtlsClient).findReferences(eq(fileUri), eq(1), eq(25));
+
+        // When
+        javaTools.findReferences(file.toString(), 3, null, "getId");
+
+        // Then - references queried from the FIELD's position, not the accessor call site
+        verify(jdtlsClient).findReferences(eq(fileUri), eq(1), eq(25));
+    }
+
+    @Test
+    void findReferences_accessorDefinitionIsRealMethod_doesNotRedirect(@TempDir Path dir) throws Exception {
+        // Given - "getId" resolves to an actual hand-written method (not a field): definition
+        // range covers "getId" on the SAME line, immediately followed by "(", not a field decl.
+        Path file = dir.resolve("Foo.java");
+        Files.writeString(
+            file, String.join(
+                "\n", List.of(
+                    "public class Foo {",
+                    "    public String getId() { return \"x\"; }",
+                    "    void caller() { getId(); }",
+                    "}")) + "\n");
+        String fileUri = file.toUri().toString();
+
+        // "getId" on line 2 (0-based line 1), columns 18-23
+        Location methodDef = new Location(fileUri, new Range(new Position(1, 18), new Position(1, 23)));
+        doReturn(List.of(methodDef))
+            .when(jdtlsClient).findDefinition(eq(fileUri), anyInt(), anyInt());
+        doReturn(List.of())
+            .when(jdtlsClient).findReferences(eq(fileUri), anyInt(), anyInt());
+
+        // When: "getId" call in caller() is on line 3, resolve by symbol
+        javaTools.findReferences(file.toString(), 3, null, "getId");
+
+        // Then - references queried from the ORIGINAL accessor call site, no redirect
+        // (0-based line 2, "getId" starts at column 20 on "    void caller() { getId(); }")
+        verify(jdtlsClient).findReferences(eq(fileUri), eq(2), eq(20));
+    }
+
+    @Test
+    void findReferences_nonAccessorSymbol_doesNotAttemptRedirect(@TempDir Path dir) throws Exception {
+        // Given - "name" is not a get/is/set/with-prefixed identifier
+        Path file = dir.resolve("Foo.java");
+        Files.writeString(file, "public class Foo {\n    private String name;\n}\n");
+        String fileUri = file.toUri().toString();
+        doReturn(List.of())
+            .when(jdtlsClient).findReferences(eq(fileUri), anyInt(), anyInt());
+
+        // When
+        javaTools.findReferences(file.toString(), 2, null, "name");
+
+        // Then - no Lombok-accessor detection attempted at all
+        verify(jdtlsClient, never()).findDefinition(anyString(), anyInt(), anyInt());
+    }
+
+    @Test
     void findReferences_handlesAbsolutePath() throws Exception {
         // Given - absolute path should be used as-is
         doReturn(List.of())
             .when(jdtlsClient).findReferences(eq("file:///absolute/path/Test.java"), anyInt(), anyInt());
 
         // When
-        String result = javaTools.findReferences("/absolute/path/Test.java", 10, 5);
+        String result = javaTools.findReferences("/absolute/path/Test.java", 10, 5, null);
 
         // Then
         verify(jdtlsClient).findReferences(eq("file:///absolute/path/Test.java"), eq(9), eq(4));
@@ -497,6 +623,41 @@ class JavaToolsTest {
         assertThat(symbolResult.get("detail").getAsString()).isEqualTo("double");
         assertThat(symbolResult.get("startLine").getAsInt()).isEqualTo(16); // 1-based
         assertThat(symbolResult.get("endLine").getAsInt()).isEqualTo(26); // 1-based
+    }
+
+    @Test
+    void getDocumentSymbols_compact_returnsOnlyNameAndKind() throws Exception {
+        // Given
+        DocumentSymbol classSymbol = new DocumentSymbol();
+        classSymbol.setName("MyClass");
+        classSymbol.setKind(SymbolKind.Class);
+        classSymbol.setDetail("");
+        classSymbol.setRange(new Range(new Position(0, 0), new Position(100, 0)));
+        classSymbol.setSelectionRange(new Range(new Position(0, 0), new Position(0, 10)));
+
+        DocumentSymbol methodSymbol = new DocumentSymbol();
+        methodSymbol.setName("myMethod");
+        methodSymbol.setKind(SymbolKind.Method);
+        methodSymbol.setDetail(" : void");
+        methodSymbol.setRange(new Range(new Position(10, 0), new Position(20, 0)));
+        methodSymbol.setSelectionRange(new Range(new Position(10, 0), new Position(10, 15)));
+
+        doReturn(List.of(classSymbol, methodSymbol))
+            .when(jdtlsClient).getDocumentSymbols(anyString());
+
+        // When
+        String result = javaTools.getDocumentSymbols("MyClass.java", true);
+
+        // Then
+        JsonObject json = gson.fromJson(result, JsonObject.class);
+        assertThat(json.get("count").getAsInt()).isEqualTo(2);
+        JsonArray symbols = json.getAsJsonArray("symbols");
+        JsonObject first = symbols.get(0).getAsJsonObject();
+        assertThat(first.get("name").getAsString()).isEqualTo("MyClass");
+        assertThat(first.get("kind").getAsString()).isEqualTo("Class");
+        assertThat(first.has("detail")).isFalse();
+        assertThat(first.has("startLine")).isFalse();
+        assertThat(first.has("endLine")).isFalse();
     }
 
 
@@ -651,6 +812,35 @@ class JavaToolsTest {
 
         assertThat(obj.get("found").getAsBoolean()).isFalse();
         assertThat(obj.get("count").getAsInt()).isZero();
+    }
+
+    @Test
+    void findIncomingCalls_includesContextAroundCallSite(@TempDir Path dir) throws Exception {
+        // Given - a 9-line file; call site sits on line 5 (1-based)
+        Path file = dir.resolve("Caller.java");
+        Files.writeString(
+            file, String.join(
+                "\n", List.of(
+                    "line1", "line2", "line3", "line4", "line5", "line6", "line7", "line8", "line9")) + "\n");
+        CallHierarchyItem caller = new CallHierarchyItem();
+        caller.setName("callerMethod");
+        caller.setDetail("CallerClass");
+        caller.setKind(SymbolKind.Method);
+        caller.setUri(file.toUri().toString());
+        caller.setRange(new Range(new Position(4, 0), new Position(4, 5)));
+        caller.setSelectionRange(new Range(new Position(4, 0), new Position(4, 5)));
+        CallHierarchyIncomingCall call = new CallHierarchyIncomingCall(
+            caller, List.of(new Range(new Position(4, 0), new Position(4, 5))));
+        doReturn(List.of(call)).when(jdtlsClient).findIncomingCalls(anyString(), anyInt(), anyInt());
+
+        // When
+        String json = javaTools.findIncomingCalls("/workspace/src/Foo.java", 5, 8, null);
+        JsonObject obj = gson.fromJson(json, JsonObject.class);
+
+        // Then
+        JsonObject call1 = obj.getAsJsonArray("calls").get(0).getAsJsonObject();
+        assertThat(call1.get("context").getAsString())
+            .isEqualTo(String.join("\n", List.of("line2", "line3", "line4", "line5", "line6", "line7", "line8")));
     }
 
     @Test

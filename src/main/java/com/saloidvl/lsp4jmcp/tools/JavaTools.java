@@ -10,6 +10,8 @@ import com.saloidvl.lsp4jmcp.client.TypeHierarchyData;
 import com.saloidvl.lsp4jmcp.tools.dto.CallSiteResult;
 import com.saloidvl.lsp4jmcp.tools.dto.CallsResponse;
 import com.saloidvl.lsp4jmcp.tools.dto.ClasspathResult;
+import com.saloidvl.lsp4jmcp.tools.dto.CompactDocumentSymbolsResponse;
+import com.saloidvl.lsp4jmcp.tools.dto.CompactSymbolResult;
 import com.saloidvl.lsp4jmcp.tools.dto.DefinitionResponse;
 import com.saloidvl.lsp4jmcp.tools.dto.DiagnosticEntry;
 import com.saloidvl.lsp4jmcp.tools.dto.DiagnosticsResponse;
@@ -41,6 +43,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import org.eclipse.lsp4j.CallHierarchyIncomingCall;
@@ -65,6 +68,7 @@ import org.slf4j.LoggerFactory;
 public class JavaTools {
     private static final Logger LOG = LoggerFactory.getLogger(JavaTools.class);
     private static final Gson GSON = new GsonBuilder().serializeNulls().setPrettyPrinting().create();
+    private static final int CONTEXT_LINES_RADIUS = 3;
 
     private final JdtlsClient client;
     private final Path workspaceRoot;
@@ -217,22 +221,139 @@ public class JavaTools {
         }
     }
 
+    private static final Pattern LOMBOK_ACCESSOR_PATTERN = Pattern.compile("^(get|is|set|with)([A-Z].*)$");
+
+    /**
+     * If {@code identifier} looks like a Lombok-style accessor (getX/isX/setX/withX), returns the
+     * backing field name it would target (prefix stripped, first letter decapitalized).
+     * Returns {@code null} otherwise.
+     */
+    private static String lombokFieldNameForAccessor(String identifier) {
+        Matcher m = LOMBOK_ACCESSOR_PATTERN.matcher(identifier);
+        if (!m.matches()) {
+            return null;
+        }
+        String rest = m.group(2);
+        return Character.toLowerCase(rest.charAt(0)) + rest.substring(1);
+    }
+
+    /**
+     * Extract the whole identifier (if any) containing the given 1-based character position on
+     * the given 1-based line. Returns {@code null} if the position isn't on an identifier.
+     */
+    private String identifierAt(String filePath, int line, int character) throws IOException {
+        String content = Files.readString(Path.of(filePath));
+        String[] lines = content.split("\n", -1);
+        if (line < 1 || line > lines.length) {
+            return null;
+        }
+        String lineContent = lines[line - 1];
+        int idx = character - 1;
+        if (idx < 0 || idx >= lineContent.length() || !Character.isJavaIdentifierPart(lineContent.charAt(idx))) {
+            return null;
+        }
+        int start = idx;
+        while (start > 0 && Character.isJavaIdentifierPart(lineContent.charAt(start - 1))) {
+            start--;
+        }
+        int end = idx;
+        while (end < lineContent.length() - 1 && Character.isJavaIdentifierPart(lineContent.charAt(end + 1))) {
+            end++;
+        }
+        return lineContent.substring(start, end + 1);
+    }
+
+    /**
+     * Best-effort check that {@code loc} points at a field declaration named {@code expectedName}
+     * (not a method — i.e. not immediately followed by {@code (}). Returns {@code false} (never
+     * throws) if the location's file can't be read, e.g. a jdt:// or jar: URI.
+     */
+    private boolean isLikelyFieldDeclaration(Location loc, String expectedName) {
+        try {
+            String path = uriToPath(loc.getUri());
+            String content = Files.readString(Path.of(path));
+            String[] lines = content.split("\n", -1);
+            int lineIdx = loc.getRange().getStart().getLine();
+            if (lineIdx < 0 || lineIdx >= lines.length) {
+                return false;
+            }
+            String lineContent = lines[lineIdx];
+            int startCol = loc.getRange().getStart().getCharacter();
+            int endCol = loc.getRange().getEnd().getCharacter();
+            if (startCol < 0 || endCol > lineContent.length() || startCol >= endCol) {
+                return false;
+            }
+            if (!lineContent.substring(startCol, endCol).equals(expectedName)) {
+                return false;
+            }
+            int i = endCol;
+            while (i < lineContent.length() && Character.isWhitespace(lineContent.charAt(i))) {
+                i++;
+            }
+            return i >= lineContent.length() || lineContent.charAt(i) != '(';
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
     /**
      * Find all references to a symbol at the given file location.
      */
-    public String findReferences(String filePath, int line, int character) {
+    public String findReferences(String filePath, int line, Integer character, String symbol) {
         try {
+            if (character == null && symbol == null) {
+                return GSON.toJson(Map.of("error", "One of 'character' or 'symbol' is required"));
+            }
+
+            int resolvedChar;
+            if (symbol != null) {
+                try {
+                    resolvedChar = resolveCharacter(filePath, line, symbol);
+                } catch (IOException e) {
+                    return GSON.toJson(Map.of("error", "Cannot read file: " + e.getMessage()));
+                } catch (IllegalArgumentException e) {
+                    return GSON.toJson(Map.of("error", e.getMessage()));
+                }
+            } else {
+                resolvedChar = character;
+            }
+
             String uri = toUri(filePath);
-            LOG.debug("Finding references at {}:{}:{}", filePath, line, character);
+            LOG.debug("Finding references at {}:{}:{}", filePath, line, resolvedChar);
+
+            String targetUri = uri;
+            int targetJdtlsLine = toJdtlsLineNumber(line);
+            int targetJdtlsChar = toJdtlsLineNumber(resolvedChar);
+
+            // Lombok accessor auto-aggregation: if this position is a getX/isX/setX/withX call
+            // whose definition resolves to the backing field (JDT+Lombok quirk — Lombok-generated
+            // accessors aren't in source, so go-to-definition falls back to the field), redirect
+            // the query to the field's position. JDT then aggregates direct field access and all
+            // accessor call sites in one response, instead of returning just this call site.
+            try {
+                String identifier = identifierAt(filePath, line, resolvedChar);
+                String fieldName = identifier != null ? lombokFieldNameForAccessor(identifier) : null;
+                if (fieldName != null) {
+                    List<? extends Location> defs = client.findDefinition(uri, targetJdtlsLine, targetJdtlsChar);
+                    if (defs != null && defs.size() == 1 && isLikelyFieldDeclaration(defs.get(0), fieldName)) {
+                        Location fieldDef = defs.get(0);
+                        targetUri = fieldDef.getUri();
+                        targetJdtlsLine = fieldDef.getRange().getStart().getLine();
+                        targetJdtlsChar = fieldDef.getRange().getStart().getCharacter();
+                    }
+                }
+            } catch (Exception e) {
+                LOG.debug("Lombok accessor detection failed, using original position", e);
+            }
 
             List<? extends Location> locations =
-                client.findReferences(uri, toJdtlsLineNumber(line), toJdtlsLineNumber(character));
+                client.findReferences(targetUri, targetJdtlsLine, targetJdtlsChar);
 
             List<LocationResult> results = locations.stream()
                 .map(this::toLocationResult)
                 .toList();
 
-            return GSON.toJson(new ReferencesResponse(filePath, line, character, results.size(), results));
+            return GSON.toJson(new ReferencesResponse(filePath, line, resolvedChar, results.size(), results));
         } catch (Exception e) {
             LOG.error("Error finding references", e);
             return GSON.toJson(Map.of("error", e.getMessage()));
@@ -576,14 +697,32 @@ public class JavaTools {
      * Get all symbols defined in a document, flattening any hierarchical structure.
      */
     public String getDocumentSymbols(String filePath) {
+        return getDocumentSymbols(filePath, false);
+    }
+
+    /**
+     * Get all symbols defined in a document, flattening any hierarchical structure.
+     *
+     * @param compact when true, each result is reduced to {@code name}/{@code kind} only
+     *                (no {@code detail}/{@code startLine}/{@code endLine}) — useful when only
+     *                the list of names is needed, not exact positions or type signatures.
+     */
+    public String getDocumentSymbols(String filePath, boolean compact) {
         try {
             String uri = toUri(filePath);
-            LOG.debug("Getting document symbols for {}", filePath);
+            LOG.debug("Getting document symbols for {} (compact={})", filePath, compact);
 
             List<? extends DocumentSymbol> symbols = client.getDocumentSymbols(uri);
 
             List<DocumentSymbolResult> results = new ArrayList<>();
             flattenDocumentSymbols(symbols, results);
+
+            if (compact) {
+                List<CompactSymbolResult> compactResults = results.stream()
+                    .map(r -> new CompactSymbolResult(r.name(), r.kind()))
+                    .toList();
+                return GSON.toJson(new CompactDocumentSymbolsResponse(filePath, compactResults.size(), compactResults));
+            }
 
             return GSON.toJson(new DocumentSymbolsResponse(filePath, results.size(), results));
         } catch (Exception e) {
@@ -914,13 +1053,35 @@ public class JavaTools {
     }
 
     private LocationResult toLocationResult(Location loc) {
+        String path = uriToPath(loc.getUri());
+        int startLine = toMcpLineNumber(loc.getRange().getStart().getLine());
         return new LocationResult(
-            uriToPath(loc.getUri()),
-            toMcpLineNumber(loc.getRange().getStart().getLine()),
+            path,
+            startLine,
             toMcpLineNumber(loc.getRange().getStart().getCharacter()),
             toMcpLineNumber(loc.getRange().getEnd().getLine()),
-            toMcpLineNumber(loc.getRange().getEnd().getCharacter())
+            toMcpLineNumber(loc.getRange().getEnd().getCharacter()),
+            readContextLines(path, startLine, CONTEXT_LINES_RADIUS)
         );
+    }
+
+    /**
+     * Read up to {@code radius} lines before and after {@code line} (1-based), clamped to file
+     * bounds. Returns {@code null} if the file cannot be read (e.g. a jdt:// or jar: URI that
+     * doesn't map to a local path).
+     */
+    private String readContextLines(String filePath, int line, int radius) {
+        try {
+            List<String> lines = Files.readAllLines(Path.of(filePath));
+            int start = Math.max(1, line - radius);
+            int end = Math.min(lines.size(), line + radius);
+            if (start > end) {
+                return null;
+            }
+            return String.join("\n", lines.subList(start - 1, end));
+        } catch (Exception e) {
+            return null;
+        }
     }
 
     private TypeHierarchyEntry toTypeHierarchyEntry(TypeHierarchyItem item) {
@@ -951,14 +1112,17 @@ public class JavaTools {
     }
 
     private CallSiteResult toCallSiteResult(String name, String container, String locationUri, Range range) {
+        String path = uriToPath(locationUri);
+        int startLine = toMcpLineNumber(range.getStart().getLine());
         return new CallSiteResult(
             name,
             container,
-            uriToPath(locationUri),
-            toMcpLineNumber(range.getStart().getLine()),
+            path,
+            startLine,
             toMcpLineNumber(range.getStart().getCharacter()),
             toMcpLineNumber(range.getEnd().getLine()),
-            toMcpLineNumber(range.getEnd().getCharacter())
+            toMcpLineNumber(range.getEnd().getCharacter()),
+            readContextLines(path, startLine, CONTEXT_LINES_RADIUS)
         );
     }
 
