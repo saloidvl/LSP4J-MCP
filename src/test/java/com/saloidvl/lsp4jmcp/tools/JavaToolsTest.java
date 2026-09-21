@@ -625,6 +625,41 @@ class JavaToolsTest {
         assertThat(symbolResult.get("endLine").getAsInt()).isEqualTo(26); // 1-based
     }
 
+    @Test
+    void getDocumentSymbols_compact_returnsOnlyNameAndKind() throws Exception {
+        // Given
+        DocumentSymbol classSymbol = new DocumentSymbol();
+        classSymbol.setName("MyClass");
+        classSymbol.setKind(SymbolKind.Class);
+        classSymbol.setDetail("");
+        classSymbol.setRange(new Range(new Position(0, 0), new Position(100, 0)));
+        classSymbol.setSelectionRange(new Range(new Position(0, 0), new Position(0, 10)));
+
+        DocumentSymbol methodSymbol = new DocumentSymbol();
+        methodSymbol.setName("myMethod");
+        methodSymbol.setKind(SymbolKind.Method);
+        methodSymbol.setDetail(" : void");
+        methodSymbol.setRange(new Range(new Position(10, 0), new Position(20, 0)));
+        methodSymbol.setSelectionRange(new Range(new Position(10, 0), new Position(10, 15)));
+
+        doReturn(List.of(classSymbol, methodSymbol))
+            .when(jdtlsClient).getDocumentSymbols(anyString());
+
+        // When
+        String result = javaTools.getDocumentSymbols("MyClass.java", true);
+
+        // Then
+        JsonObject json = gson.fromJson(result, JsonObject.class);
+        assertThat(json.get("count").getAsInt()).isEqualTo(2);
+        JsonArray symbols = json.getAsJsonArray("symbols");
+        JsonObject first = symbols.get(0).getAsJsonObject();
+        assertThat(first.get("name").getAsString()).isEqualTo("MyClass");
+        assertThat(first.get("kind").getAsString()).isEqualTo("Class");
+        assertThat(first.has("detail")).isFalse();
+        assertThat(first.has("startLine")).isFalse();
+        assertThat(first.has("endLine")).isFalse();
+    }
+
 
 
     // ============================================

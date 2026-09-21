@@ -152,21 +152,25 @@ public final class JavaMcpServer {
             .toolCall(
                 Tool.builder()
                     .name("document_symbols")
-                    .description("Get all symbols (classes, methods, fields) defined in a Java file")
+                    .description(
+                        "Get all symbols (classes, methods, fields) defined in a Java file. Pass compact=true to reduce each result to name/kind only (no detail/startLine/endLine) when only the list of names is needed.")
                     .inputSchema(objectMapper.readValue("""
                     {
                       "type": "object",
                       "properties": {
-                        "file": { "type": "string", "description": "Path to the Java file" }
+                        "file": { "type": "string", "description": "Path to the Java file" },
+                        "compact": { "type": "boolean", "description": "If true, return only name/kind per symbol (default false)" }
                       },
                       "required": ["file"]
                     }
                     """, McpSchema.JsonSchema.class))
                     .build(),
-                (exchange, request) ->
-                    CallToolResult.builder()
-                        .addTextContent(javaTools.getDocumentSymbols((String) request.arguments().get("file")))
-                        .build())
+                (exchange, request) -> {
+                    boolean compact = Boolean.TRUE.equals(request.arguments().get("compact"));
+                    return CallToolResult.builder()
+                        .addTextContent(javaTools.getDocumentSymbols((String) request.arguments().get("file"), compact))
+                        .build();
+                })
 
             .toolCall(
                 Tool.builder()

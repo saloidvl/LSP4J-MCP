@@ -10,6 +10,8 @@ import com.saloidvl.lsp4jmcp.client.TypeHierarchyData;
 import com.saloidvl.lsp4jmcp.tools.dto.CallSiteResult;
 import com.saloidvl.lsp4jmcp.tools.dto.CallsResponse;
 import com.saloidvl.lsp4jmcp.tools.dto.ClasspathResult;
+import com.saloidvl.lsp4jmcp.tools.dto.CompactDocumentSymbolsResponse;
+import com.saloidvl.lsp4jmcp.tools.dto.CompactSymbolResult;
 import com.saloidvl.lsp4jmcp.tools.dto.DefinitionResponse;
 import com.saloidvl.lsp4jmcp.tools.dto.DiagnosticEntry;
 import com.saloidvl.lsp4jmcp.tools.dto.DiagnosticsResponse;
@@ -695,14 +697,32 @@ public class JavaTools {
      * Get all symbols defined in a document, flattening any hierarchical structure.
      */
     public String getDocumentSymbols(String filePath) {
+        return getDocumentSymbols(filePath, false);
+    }
+
+    /**
+     * Get all symbols defined in a document, flattening any hierarchical structure.
+     *
+     * @param compact when true, each result is reduced to {@code name}/{@code kind} only
+     *                (no {@code detail}/{@code startLine}/{@code endLine}) — useful when only
+     *                the list of names is needed, not exact positions or type signatures.
+     */
+    public String getDocumentSymbols(String filePath, boolean compact) {
         try {
             String uri = toUri(filePath);
-            LOG.debug("Getting document symbols for {}", filePath);
+            LOG.debug("Getting document symbols for {} (compact={})", filePath, compact);
 
             List<? extends DocumentSymbol> symbols = client.getDocumentSymbols(uri);
 
             List<DocumentSymbolResult> results = new ArrayList<>();
             flattenDocumentSymbols(symbols, results);
+
+            if (compact) {
+                List<CompactSymbolResult> compactResults = results.stream()
+                    .map(r -> new CompactSymbolResult(r.name(), r.kind()))
+                    .toList();
+                return GSON.toJson(new CompactDocumentSymbolsResponse(filePath, compactResults.size(), compactResults));
+            }
 
             return GSON.toJson(new DocumentSymbolsResponse(filePath, results.size(), results));
         } catch (Exception e) {

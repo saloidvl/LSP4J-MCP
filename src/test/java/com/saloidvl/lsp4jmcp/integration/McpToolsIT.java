@@ -136,6 +136,15 @@ class McpToolsIT {
     }
 
     @Test
+    void documentSymbols_compact_returnsOnlyNameAndKind() throws Exception {
+        String expected = getFromFile("integration/document_symbols_greeter_impl_compact.json");
+        String actual = callTool(
+            "document_symbols", Map.of("file", fixtureFile("GreeterImpl.java"), "compact", true));
+
+        JSONAssert.assertEquals(expected, actual, JSONCompareMode.NON_EXTENSIBLE);
+    }
+
+    @Test
     void findReferences_findsGreetCallSites() throws Exception {
         String expected = getFromFile("integration/find_references_greet.json");
         String actual = callTool(
