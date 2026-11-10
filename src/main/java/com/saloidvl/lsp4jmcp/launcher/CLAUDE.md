@@ -10,6 +10,8 @@
 4. Open a TCP socket to the worker
 5. Pipe `System.in → worker socket` and `worker socket → System.out` using virtual threads
 6. Close lease on exit (causes the supervisor to schedule idle shutdown for that repo)
+7. Exit as soon as the worker closes the TCP connection, without waiting for client stdin to end,
+   so the client sees the transport close immediately instead of on its next tool call
 
 ## stdio Contract
 

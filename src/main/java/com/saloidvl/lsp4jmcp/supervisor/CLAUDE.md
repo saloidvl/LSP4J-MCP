@@ -6,12 +6,28 @@ This package manages the machine-local worker registry and the lease protocol.
 
 | Class                   | Role                                                                                                                                                       |
 |-------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `SupervisorMain`        | Unix domain socket server; singleton per machine via `FileLock`. Handles OPEN_LEASE requests, per-repo worker startup, idle shutdown scheduling.           |
-| `SupervisorClient`      | Interface + `SocketSupervisorClient` impl used by `LauncherMain`. `connectOrStart()` starts `SupervisorMain` as a child JVM if the socket is unreachable.  |
+| `SupervisorMain`        | Unix domain socket server; singleton per machine via `FileLock`. Handles OPEN_LEASE requests, per-repo worker startup, idle shutdown scheduling, and its own idle exit. |
+| `SupervisorClient`      | Interface + `SocketSupervisorClient` impl used by `LauncherMain`. `connectOrStart()` starts `SupervisorMain` in a detached session if the socket is unreachable. |
 | `WorkerRegistry`        | In-memory map of `repoId → WorkerRecord`. Tracks leases; provides `collectIdleWorkers`.                                                                    |
 | `WorkerRecord`          | Mutable state for one worker: host, port, PID, settings fingerprint, lease set, last-release timestamp, and pending-shutdown future.                       |
 | `WorkerState`           | Lifecycle state; `READY` workers may receive leases and `STOPPING` workers are quarantined until their exit is confirmed.                                  |
 | `WorkerProcessLauncher` | Interface + `JvmWorkerProcessLauncher` impl. Starts `RepoWorkerMain` in a child JVM reusing the current classpath, then reads `READY <port> <fingerprint>`.  |
+
+## Detached Supervisor
+
+`SupervisorClient.startSupervisorProcess()` runs `SupervisorMain` in a new session and process group
+(`/usr/bin/perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV'`, or the `setsid` utility where perl is
+absent), with the home directory as cwd and `/dev/null` as stdin. MCP clients such as Codex kill the
+whole process group of an MCP server when a session ends; without detaching, the supervisor, its
+workers, and JDTLS would die with whichever session started them first. Workers inherit the
+supervisor's session. The supervisor also inherits the environment (`LOG_FILE` and others) of the
+first launcher that started it.
+
+## Supervisor Idle Exit
+
+Because no client owns the supervisor, it exits on its own: a periodic check
+(`SUPERVISOR_IDLE_CHECK_INTERVAL`, 30 s) closes it once there have been no workers and no control
+connections for `SUPERVISOR_IDLE_SHUTDOWN_DELAY` (3 min).
 
 ## Supervisor Singleton Protocol
 

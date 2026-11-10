@@ -59,9 +59,10 @@ public final class LauncherMain {
                     new InetSocketAddress(lease.host(), lease.port()),
                     Math.toIntExact(RuntimeConstants.WORKER_TCP_CONNECT_TIMEOUT.toMillis())
                 );
-                Thread upstream = Thread.startVirtualThread(() -> copyClientToWorker(clientInput, socket));
+                // Not joined: it blocks on client stdin and cannot be interrupted.
+                Thread.startVirtualThread(() -> copyClientToWorker(clientInput, socket));
                 copy(socket.getInputStream(), clientOutput);
-                upstream.join();
+                clientOutput.flush();
             }
         }
     }

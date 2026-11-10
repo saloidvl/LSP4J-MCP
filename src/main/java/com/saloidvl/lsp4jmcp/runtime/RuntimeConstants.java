@@ -8,6 +8,8 @@ public final class RuntimeConstants {
     public static final Duration WORKER_READINESS_POLL_INTERVAL = Duration.ofMillis(100);
     public static final Duration WORKER_TCP_CONNECT_TIMEOUT = Duration.ofSeconds(3);
     public static final Duration WORKER_IDLE_SHUTDOWN_DELAY = Duration.ofSeconds(30);
+    public static final Duration SUPERVISOR_IDLE_SHUTDOWN_DELAY = Duration.ofMinutes(3);
+    public static final Duration SUPERVISOR_IDLE_CHECK_INTERVAL = Duration.ofSeconds(30);
     public static final Duration WORKER_GRACEFUL_SHUTDOWN_TIMEOUT = Duration.ofSeconds(5);
     public static final Duration WORKER_FORCE_KILL_TIMEOUT = Duration.ofSeconds(2);
     public static final Duration JDTLS_GRACEFUL_SHUTDOWN_TIMEOUT = Duration.ofSeconds(60);

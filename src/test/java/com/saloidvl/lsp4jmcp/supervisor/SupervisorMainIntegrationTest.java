@@ -21,6 +21,7 @@ import java.nio.channels.Channels;
 import java.nio.channels.SocketChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -677,6 +678,61 @@ class SupervisorMainIntegrationTest {
         assertThat(processes.get(1).isAlive()).isTrue();
         assertThat(starts).hasValue(2);
         running.close();
+    }
+
+    @Test
+    void run_exitsAndRemovesSocketAfterIdleDelayWithoutWorkersOrConnections(@TempDir Path tempDir)
+            throws Exception {
+        Path socketPath = tempDir.resolve("supervisor.sock");
+        CountDownLatch ready = new CountDownLatch(1);
+        SupervisorMain supervisor = new SupervisorMain(
+                socketPath,
+                new WorkerRegistry(),
+                (workspacePath, jdtlsCommand, settingsInputs) -> {
+                    throw new AssertionError("no worker expected");
+                },
+                ready::countDown,
+                Duration.ofMillis(300),
+                Duration.ofMillis(50));
+        Thread serverThread = start(supervisor);
+        assertThat(ready.await(5, TimeUnit.SECONDS)).isTrue();
+
+        serverThread.join(5_000);
+
+        assertThat(serverThread.isAlive()).isFalse();
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (Files.exists(socketPath) && System.nanoTime() < deadline) {
+            Thread.sleep(20);
+        }
+        assertThat(socketPath).doesNotExist();
+    }
+
+    @Test
+    void run_staysAliveWhileLeaseIsHeld(@TempDir Path tempDir)
+            throws Exception {
+        Path socketPath = tempDir.resolve("supervisor.sock");
+        CountDownLatch ready = new CountDownLatch(1);
+        SupervisorMain supervisor = new SupervisorMain(
+                socketPath,
+                new WorkerRegistry(),
+                (workspacePath, jdtlsCommand, settingsInputs) -> new WorkerProcessLauncher.StartedWorker(
+                        new TrackingProcess(), 321L, "127.0.0.1", 45123,
+                        settingsFingerprint(workspacePath, settingsInputs)),
+                ready::countDown,
+                Duration.ofMillis(300),
+                Duration.ofMillis(50));
+        Thread serverThread = start(supervisor);
+        assertThat(ready.await(5, TimeUnit.SECONDS)).isTrue();
+
+        Path workspace = Files.createDirectories(tempDir.resolve("repo"));
+        try (SocketChannel lease = openLeaseChannel(socketPath, request(workspace, JdtlsSettingsInputs.empty()))) {
+            assertThat(readResponse(lease).ok()).isTrue();
+            serverThread.join(1_000);
+            assertThat(serverThread.isAlive()).isTrue();
+        }
+
+        supervisor.close();
+        serverThread.join(2_000);
     }
 
     private static SocketChannel openLeaseChannel(

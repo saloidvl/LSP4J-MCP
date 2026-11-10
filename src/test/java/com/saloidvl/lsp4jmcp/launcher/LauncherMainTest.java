@@ -19,7 +19,8 @@ class LauncherMainTest {
 
         JdtlsSettingsInputs inputs = LauncherMain.readSettingsInputs(env);
 
-        assertThat(inputs.settingsFile()).isEqualTo("config/jdtls.json");
+        assertThat(inputs.settingsFile())
+                .isEqualTo(java.nio.file.Path.of("config/jdtls.json").toAbsolutePath().toString());
         assertThat(inputs.gradleAptEnabled()).isEqualTo("false");
     }
 
