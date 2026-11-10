@@ -11,6 +11,7 @@ import com.saloidvl.lsp4jmcp.runtime.SocketPaths;
 
 import java.io.BufferedReader;
 import java.io.BufferedWriter;
+import java.io.File;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.OutputStreamWriter;
@@ -20,10 +21,14 @@ import java.nio.channels.Channels;
 import java.nio.channels.SocketChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.stream.Collectors;
 
 public interface SupervisorClient {
     Lease openLease(
@@ -67,14 +72,36 @@ public interface SupervisorClient {
     private static Process startSupervisorProcess() throws IOException {
         Files.createDirectories(SocketPaths.supervisorSocketDirectory());
         String javaBin = Path.of(System.getProperty("java.home"), "bin", "java").toString();
-        String classpath = System.getProperty("java.class.path");
+        String classpath = Arrays.stream(System.getProperty("java.class.path").split(File.pathSeparator))
+            .map(entry -> Path.of(entry).toAbsolutePath().toString())
+            .collect(Collectors.joining(File.pathSeparator));
 
-        return new ProcessBuilder(
-            javaBin,
-            "-cp",
-            classpath,
-            SupervisorMain.class.getName()
-        ).start();
+        ProcessBuilder builder = new ProcessBuilder(detachedCommand(List.of(
+                javaBin,
+                "-cp",
+                classpath,
+                SupervisorMain.class.getName())))
+            .directory(new File(System.getProperty("user.home")))
+            .redirectInput(new File("/dev/null"));
+        builder.environment().computeIfPresent("LOMBOK_JAR",
+            (key, value) -> value.isBlank() ? value : Path.of(value.trim()).toAbsolutePath().toString());
+        return builder.start();
+    }
+
+    /** Runs the command in a new session: clients such as Codex kill the launcher's whole process group. */
+    static List<String> detachedCommand(List<String> command) {
+        List<String> wrapped = new ArrayList<>();
+        Path perl = Path.of("/usr/bin/perl");
+        if (Files.isExecutable(perl)) {
+            wrapped.add(perl.toString());
+            wrapped.add("-MPOSIX");
+            wrapped.add("-e");
+            wrapped.add("POSIX::setsid() or die \"setsid: $!\"; exec @ARGV or die \"exec: $!\"");
+        } else {
+            wrapped.add("setsid");
+        }
+        wrapped.addAll(command);
+        return wrapped;
     }
 
     private static void awaitSupervisorReady(Process process) throws Exception {

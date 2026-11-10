@@ -23,6 +23,7 @@ import java.nio.channels.SocketChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+import java.time.Duration;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
@@ -44,6 +45,8 @@ public class SupervisorMain implements AutoCloseable {
     private final WorkerRegistry registry;
     private final WorkerProcessLauncher workerProcessLauncher;
     private final Runnable onReady;
+    private final Duration idleShutdownDelay;
+    private final Duration idleCheckInterval;
     private final Gson gson = new Gson();
     private final Set<SocketChannel> activeChannels = ConcurrentHashMap.newKeySet();
     private final Map<String, Object> repoLocks = new ConcurrentHashMap<>();
@@ -53,6 +56,7 @@ public class SupervisorMain implements AutoCloseable {
     private FileChannel lockChannel;
     private FileLock supervisorLock;
     private volatile boolean closed;
+    private long idleSinceNanos = -1;
 
     public SupervisorMain() {
         this(
@@ -68,10 +72,29 @@ public class SupervisorMain implements AutoCloseable {
             WorkerRegistry registry,
             WorkerProcessLauncher workerProcessLauncher,
             Runnable onReady) {
+        this(
+            socketPath,
+            registry,
+            workerProcessLauncher,
+            onReady,
+            RuntimeConstants.SUPERVISOR_IDLE_SHUTDOWN_DELAY,
+            RuntimeConstants.SUPERVISOR_IDLE_CHECK_INTERVAL
+        );
+    }
+
+    SupervisorMain(
+            Path socketPath,
+            WorkerRegistry registry,
+            WorkerProcessLauncher workerProcessLauncher,
+            Runnable onReady,
+            Duration idleShutdownDelay,
+            Duration idleCheckInterval) {
         this.socketPath = socketPath;
         this.registry = registry;
         this.workerProcessLauncher = workerProcessLauncher;
         this.onReady = onReady;
+        this.idleShutdownDelay = idleShutdownDelay;
+        this.idleCheckInterval = idleCheckInterval;
     }
 
     public static void main(String[] args) throws Exception {
@@ -101,6 +124,11 @@ public class SupervisorMain implements AutoCloseable {
         serverSocketChannel = ServerSocketChannel.open(StandardProtocolFamily.UNIX);
         serverSocketChannel.bind(UnixDomainSocketAddress.of(socketPath));
         cleanupExecutor = Executors.newSingleThreadScheduledExecutor();
+        cleanupExecutor.scheduleWithFixedDelay(
+            this::exitIfIdle,
+            idleCheckInterval.toMillis(),
+            idleCheckInterval.toMillis(),
+            TimeUnit.MILLISECONDS);
         onReady.run();
 
         while (!closed) {
@@ -402,6 +430,32 @@ public class SupervisorMain implements AutoCloseable {
             if (registry.get(repoId) == record) {
                 registry.remove(repoId);
             }
+        }
+    }
+
+    private void exitIfIdle() {
+        synchronized (this) {
+            if (closed) {
+                return;
+            }
+            if (!activeChannels.isEmpty() || !registry.isEmpty()) {
+                idleSinceNanos = -1;
+                return;
+            }
+            long now = System.nanoTime();
+            if (idleSinceNanos < 0) {
+                idleSinceNanos = now;
+                return;
+            }
+            if (now - idleSinceNanos < idleShutdownDelay.toNanos()) {
+                return;
+            }
+        }
+        LOG.info("Supervisor idle for {}s, shutting down", idleShutdownDelay.toSeconds());
+        try {
+            close();
+        } catch (IOException e) {
+            LOG.warn("Supervisor idle shutdown failed", e);
         }
     }
 

@@ -35,7 +35,8 @@ class JdtlsSettingsLoaderTest {
 
         JdtlsSettingsInputs inputs = JdtlsSettingsInputs.fromEnvironment(env);
 
-        assertThat(inputs.settingsFile()).isEqualTo("config/jdtls.json");
+        assertThat(inputs.settingsFile())
+                .isEqualTo(java.nio.file.Path.of("config/jdtls.json").toAbsolutePath().toString());
         assertThat(inputs.runtimeHome()).isEqualTo("/jdks/21");
         assertThat(inputs.gradleJavaHome()).isNull();
         assertThat(inputs.gradleAptEnabled()).isEqualTo("false");

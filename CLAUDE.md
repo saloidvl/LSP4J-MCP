@@ -53,6 +53,9 @@ Runtime rules:
 - Keep `stdout` reserved for MCP traffic and send logs to `LOG_FILE` or `/tmp/lsp4j-mcp.log`
 - Load server version from filtered Maven build metadata in `src/main/resources/build-info.properties`
 
+- Do not guard against races whose window is a few milliseconds (for example a supervisor idle exit
+  racing a new lease request); no retries or reordering for them
+
 ## Main Components
 
 - `JavaMcpServer` - shared MCP server bootstrap on arbitrary input/output streams

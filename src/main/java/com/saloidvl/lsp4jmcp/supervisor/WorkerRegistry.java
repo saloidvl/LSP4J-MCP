@@ -121,6 +121,10 @@ public final class WorkerRegistry {
         return idleWorkers;
     }
 
+    public synchronized boolean isEmpty() {
+        return workersByRepoId.isEmpty();
+    }
+
     public synchronized void remove(String repoId) {
         WorkerRecord record = workersByRepoId.remove(repoId);
         if (record == null) {
